@@ -28,7 +28,7 @@ print(df)
 print("\n" + "="*50 + "\n")
 
 converter = DF2G(df)
-graph = converter.schema_graph()
+graph = converter._create_value_based_graph()
 summary = converter.get_graph_summary(graph)
 
 print(f"Graph Summary:\n{summary}")

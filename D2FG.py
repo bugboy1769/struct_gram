@@ -51,6 +51,48 @@ class DF2G:
                     G.add_edge(f"col_{col}", value_node, edge_type = "contains_value")
         return G
     
+    def _create_value_based_graph(self) -> nx.Graph:
+        """
+        Create graph focusing on value relationships across the table.
+        """
+        G = nx.Graph()
+        
+        # Create value nodes
+        value_to_locations = {}
+        
+        for col in self.df.columns:
+            for idx, value in enumerate(self.df[col]):
+                if not pd.isna(value):
+                    # Normalize value for comparison
+                    normalized_value = self._normalize_value(value)
+                    value_to_locations[normalized_value].append((col, idx, value))
+        
+        # Add nodes for values that appear in multiple locations
+        for norm_value, locations in value_to_locations.items():
+            if len(locations) > 1:
+                value_node = f"value_{hash(norm_value) % 10000}"
+                G.add_node(value_node,
+                          node_type="shared_value",
+                          normalized_value=norm_value,
+                          occurrences=len(locations),
+                          locations=locations)
+                
+                # Connect to position nodes
+                for col, row_idx, original_value in locations:
+                    pos_node = f"pos_{col}_{row_idx}"
+                    if not G.has_node(pos_node):
+                        G.add_node(pos_node,
+                                  node_type="position",
+                                  column=col,
+                                  row=row_idx,
+                                  value=original_value)
+                    
+                    G.add_edge(value_node, pos_node,
+                              edge_type="occurs_at")
+        
+        return G
+
+    
     def _get_col_stats(self, col):
         series = self.df[col]
         stats = {
