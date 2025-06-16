@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch_geometric.nn import GCNConv
 import torch.nn.functional as F
 from torch_geometric.utils import from_networkx
+from sentence_transformers import SentenceTransformer
 
 class GCNEncoder(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers = 2):
@@ -66,6 +67,15 @@ def embed_graph(G, embedding_dim = 32):
         embeddings = model(data.x, data.edge_index)
     
     return embeddings.numpy(), model
+
+def encode_het_nodes(G, encoder_model = 'all-MiniLM-L6-v2'):
+    encoder = SentenceTransformer(encoder_model)
+    for node in G.nodes():
+        node_text = str(G.nodes[node].get('text', f"node_{node}"))
+        embedding = encoder.encode(node_text)
+        G.nodes[node]['features'] = embedding.tolist()
+
+
 
 
 

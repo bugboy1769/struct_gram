@@ -4,7 +4,12 @@ import pandas as pd
 import networkx as nx
 import matplotlib.pyplot as plt
 import scipy as sp
-from GCN import GCNEncoder, embed_graph, networkx_to_torch_geometric
+from GCN import GCNEncoder, embed_graph, networkx_to_torch_geometric, encode_het_nodes
+import torch
+import torch.nn as nn
+from torch_geometric.nn import GCNConv
+import torch.nn.functional as F
+from torch_geometric.utils import from_networkx
 
 sample_data = {
         'employee_id': [1, 2, 3, 4, 5],
@@ -38,8 +43,6 @@ Complete example showing how to visualize graphs created from DataFrames.
 """
 
 # Assuming you have the DataFrameToGraph class from the previous artifact
-converter = DF2G(df)
-G = converter.schema_graph()
 
 # Create visualizer
 # viz = GraphVisualizer(G)
@@ -62,6 +65,7 @@ G = converter.schema_graph()
 # print("\n" + "="*50 + "\n")
 # print(ftr_mat)
 
+het_graph = encode_het_nodes(graph)
 torch_graph = networkx_to_torch_geometric(graph)
 print(torch_graph)
 
