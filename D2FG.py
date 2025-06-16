@@ -11,8 +11,6 @@ class DF2G:
         self.graph = nx.Graph()
         self.node_atts = {}
         self.edge_atts = {}
-        
-
 
     def schema_graph(self) -> nx.Graph:
 

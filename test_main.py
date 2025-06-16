@@ -3,6 +3,8 @@ from viz import GraphVisualizer
 import pandas as pd
 import networkx as nx
 import matplotlib.pyplot as plt
+import scipy as sp
+from GCN import GCNEncoder, embed_graph, networkx_to_torch_geometric
 
 sample_data = {
         'employee_id': [1, 2, 3, 4, 5],
@@ -13,8 +15,8 @@ sample_data = {
         'location': ['NYC', 'SF', 'NYC', 'LA', 'SF']
     }
 
-coffee_data =  pd.read_csv('customer.csv')
-df = pd.DataFrame(coffee_data)
+df = pd.read_csv('customer.csv')
+
     
 print("Original DataFrame:")
 print(df)
@@ -36,22 +38,31 @@ Complete example showing how to visualize graphs created from DataFrames.
 """
 
 # Assuming you have the DataFrameToGraph class from the previous artifact
-converter = DF2G(df, strategy="hybrid")
-G = converter.create_graph()
+converter = DF2G(df)
+G = converter.schema_graph()
 
 # Create visualizer
-viz = GraphVisualizer(G)
+# viz = GraphVisualizer(G)
 
-print("1. Basic Matplotlib Visualization:")
-viz.basic_matplotlib_viz()
+# print("1. Basic Matplotlib Visualization:")
+# viz.basic_matplotlib_viz()
 
-print("\n2. Hierarchical Layout:")
-viz.hierarchical_viz()
+# print("\n2. Hierarchical Layout:")
+# viz.hierarchical_viz()
 
-print("\n3. Interactive Plotly Visualization:")
-viz.interactive_plotly_viz()
+# print("\n3. Interactive Plotly Visualization:")
+# viz.interactive_plotly_viz()
 
-print("\n4. Adjacency Matrix:")
-viz.adjacency_matrix_viz()
+# print("\n4. Adjacency Matrix:")
+# viz.adjacency_matrix_viz()
+
+# adj_mat = nx.adjacency_matrix(G)
+# ftr_mat = nx.attr_matrix(G)
+# print(adj_mat)
+# print("\n" + "="*50 + "\n")
+# print(ftr_mat)
+
+torch_graph = networkx_to_torch_geometric(graph)
+print(torch_graph)
 
 
