@@ -45,28 +45,30 @@ Complete example showing how to visualize graphs created from DataFrames.
 # Assuming you have the DataFrameToGraph class from the previous artifact
 
 # Create visualizer
-# viz = GraphVisualizer(G)
+viz = GraphVisualizer(graph)
 
-# print("1. Basic Matplotlib Visualization:")
-# viz.basic_matplotlib_viz()
+print("1. Basic Matplotlib Visualization:")
+viz.basic_matplotlib_viz()
 
-# print("\n2. Hierarchical Layout:")
-# viz.hierarchical_viz()
+print("\n2. Hierarchical Layout:")
+viz.hierarchical_viz()
 
-# print("\n3. Interactive Plotly Visualization:")
-# viz.interactive_plotly_viz()
+print("\n3. Interactive Plotly Visualization:")
+viz.interactive_plotly_viz()
 
-# print("\n4. Adjacency Matrix:")
-# viz.adjacency_matrix_viz()
+print("\n4. Adjacency Matrix:")
+viz.adjacency_matrix_viz()
 
-# adj_mat = nx.adjacency_matrix(G)
-# ftr_mat = nx.attr_matrix(G)
-# print(adj_mat)
-# print("\n" + "="*50 + "\n")
-# print(ftr_mat)
+adj_mat = nx.adjacency_matrix(G)
+ftr_mat = nx.attr_matrix(G)
+print(adj_mat)
+print("\n" + "="*50 + "\n")
+print(ftr_mat)
 
-het_graph = encode_het_nodes(graph)
-torch_graph = networkx_to_torch_geometric(graph)
-print(torch_graph)
+# het_g = encode_het_nodes(graph)
+# # torch_graph = networkx_to_torch_geometric(graph)
+# print('\n' + "="*50 + '\n')
+# print(f"Sample nodes: {list(het_g.nodes())[:5]}")
+# print(f"Sample edges: {list(het_g.edges())[:5]}")
 
 
