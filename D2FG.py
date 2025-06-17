@@ -2,6 +2,7 @@ import pandas as pd
 import networkx as nx
 import numpy as np
 import re as r
+from collections import defaultdict
 
 #Schema Aware Representation
 class DF2G:
@@ -58,7 +59,7 @@ class DF2G:
         G = nx.Graph()
         
         # Create value nodes
-        value_to_locations = {}
+        value_to_locations = defaultdict(list)
         
         for col in self.df.columns:
             for idx, value in enumerate(self.df[col]):
@@ -118,6 +119,16 @@ class DF2G:
                 'contains_sp_chars': series.str.contains(r'[^a-zA-Z0-9\s]').any()
             })
         return stats
+    
+    def _normalize_value(self, value: any) -> str:
+        """Normalize values for comparison across columns."""
+        if isinstance(value, (int, float)):
+            return f"num_{value}"
+        elif isinstance(value, str):
+            # Basic normalization
+            return value.lower().strip()
+        else:
+            return str(value)
     
     def get_graph_summary(self, G: nx.Graph) -> dict[str, any]:
         node_types = {}
