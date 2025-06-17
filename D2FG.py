@@ -3,7 +3,9 @@ import networkx as nx
 import numpy as np
 import re as r
 from collections import defaultdict
-
+import fasttext as ft
+import fasttext.util as ftu
+import math
 #Schema Aware Representation
 class DF2G:
 
@@ -12,6 +14,7 @@ class DF2G:
         self.graph = nx.Graph()
         self.node_atts = {}
         self.edge_atts = {}
+        self.ft_embedder = ft.load_model('cc.en.300.bin')
 
     def schema_graph(self) -> nx.Graph:
 
@@ -178,9 +181,44 @@ class DF2G:
                         col1, col2 = col_list[i], col_list[j]
                         if not G.has_edge(f"col_{col1}", f"col_{col2}"):
                             G.add_edge(f"col_{col1}", f"col_{col2}", edge_type = "has_dtype", dtype = str(dtype), weight = 0.5)
+        G = self.homogenise_column_features(G)
         return G
 
+    def homogenise_column_features(self, G:nx.Graph) -> nx.Graph:
 
+        all_features = set()
+        for node, attrs in G.nodes(data=True):
+            all_features.update(attrs.keys())
+        
+        exclude_keys = {'node_types', 'column_names'}
+        feature_keys = sorted(all_features - exclude_keys)
+
+        for node, attrs in G.nodes(data=True):
+            feature_vector = []
+            for key in feature_keys:
+                value = attrs.get(key, None)
+
+                if value is None:
+                    feature_vector.append(0.0)
+                elif isinstance(value, (int, float)):
+                    if pd.isna(value):
+                        feature_vector.append(0.0)
+                    else:
+                        feature_vector.append(float(value))
+                elif isinstance(value, bool):
+                    feature_vector.append(1.0 if value else 0.0)
+                elif isinstance(value, str):
+                    feature_vector.append(self.ft_embedder.get_word_vector(value).tolist())
+                else:
+                    feature_vector.append(self.ft_embedder.get_word_vector(value).tolist())
+        
+        G.nodes[node]['features'] = feature_vector
+
+        if feature_keys:
+            G.graph['feature_dim'] = len(feature_keys)
+            G.graph['feature_keys'] = feature_keys
+
+        return G
 
     def _get_col_stats(self, col):
         series = self.df[col]
@@ -269,6 +307,101 @@ class DF2G:
             'is_connected': nx.is_connected(G),
             'num_components': nx.number_connected_components(G)
         }
+    def homogenise_column_features(self, G: nx.Graph) -> nx.Graph:
+    
+        all_features = set()
+        for node, attrs in G.nodes(data=True):
+            all_features.update(attrs.keys())
+    
+        exclude_keys = {'node_type', 'column_name'}
+        feature_keys = sorted(all_features - exclude_keys)
+    
+        # Separate features by type
+        text_features = ['data_type']
+        numerical_features = ['unique_count', 'null_count', 'null_percentage', 'mean', 'median', 'std_dev', 'min', 'max', 'avg_length', 'max_length']
+        boolean_features = ['contains_numbers', 'contains_sp_chars']
+        
+        # Collect all numerical values for normalization
+        all_numerical_values = {}
+        for feat in numerical_features:
+            values = []
+            for node, attrs in G.nodes(data=True):
+                if feat in attrs and attrs[feat] is not None and not pd.isna(attrs[feat]):
+                    values.append(float(attrs[feat]))
+            if values:
+                all_numerical_values[feat] = {'min': min(values), 'max': max(values), 'mean': sum(values)/len(values)}
+        
+        def positional_encoding(value, feat_name, d_model=300):
+            """Apply sinusoidal positional encoding to normalized numerical values"""
+            if feat_name not in all_numerical_values:
+                return [0.0] * d_model
+                
+            # Normalize value to [0, 1] range
+            feat_stats = all_numerical_values[feat_name]
+            if feat_stats['max'] == feat_stats['min']:
+                normalized = 0.5
+            else:
+                normalized = (value - feat_stats['min']) / (feat_stats['max'] - feat_stats['min'])
+            
+            # Apply sinusoidal encoding
+            encoding = []
+            for i in range(d_model):
+                if i % 2 == 0:
+                    encoding.append(math.sin(normalized * (10000 ** (i / d_model))))
+                else:
+                    encoding.append(math.cos(normalized * (10000 ** (i / d_model))))
+            return encoding
+
+        for node, attrs in G.nodes(data=True):
+            feature_vector = []
+            
+            # Text embeddings (300d)
+            text_embeddings = []
+            for feat in text_features:
+                value = attrs.get(feat, None)
+                if value is not None:
+                    # FastText embedding for textual data
+                    text_embeddings.extend(self.ft_embedder.get_word_vector(str(value)).tolist())
+                else:
+                    text_embeddings.extend([0.0] * 300)
+            feature_vector.extend(text_embeddings)
+        
+        # Numerical embeddings (300d each)
+        numerical_embeddings = []
+        for feat in numerical_features:
+            value = attrs.get(feat, None)
+            if value is not None and not pd.isna(value):
+                # Positional encoding for numerical data
+                numerical_embeddings.extend(positional_encoding(float(value), feat))
+            else:
+                numerical_embeddings.extend([0.0] * 300)
+        feature_vector.extend(numerical_embeddings)
+        
+        # Boolean embeddings (300d each)
+        boolean_embeddings = []
+        for feat in boolean_features:
+            value = attrs.get(feat, None)
+            if value is not None:
+                # Convert boolean to descriptive text and embed
+                text_repr = f"{feat}_{'yes' if value else 'no'}"
+                boolean_embeddings.extend(self.ft_embedder.get_word_vector(text_repr).tolist())
+            else:
+                boolean_embeddings.extend([0.0] * 300)
+        feature_vector.extend(boolean_embeddings)
+        
+        G.nodes[node]['features'] = feature_vector
+
+        # Update graph metadata
+        total_dim = len(text_features) * 300 + len(numerical_features) * 300 + len(boolean_features) * 300
+        G.graph['feature_dim'] = total_dim
+        G.graph['feature_composition'] = {
+            'text_features': text_features,
+            'numerical_features': numerical_features, 
+            'boolean_features': boolean_features,
+            'embedding_dims': {'text': 300, 'numerical': 300, 'boolean': 300}
+        }
+
+        return G
 
     
 
