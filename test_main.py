@@ -21,14 +21,15 @@ sample_data = {
     }
 
 df = pd.read_csv('customer.csv')
-dfs = pd.DataFrame(sample_data)
+dfs = df[:10]
     
 print("Original DataFrame:")
 print(dfs)
 print("\n" + "="*50 + "\n")
 
 converter = DF2G(dfs)
-graph = converter._create_value_based_graph()
+graph = converter.create_column_graph()
+f_graph = converter.apply_force_directed_layout(graph, iterations=20)
 summary = converter.get_graph_summary(graph)
 
 print(f"Graph Summary:\n{summary}")
@@ -45,7 +46,7 @@ Complete example showing how to visualize graphs created from DataFrames.
 # Assuming you have the DataFrameToGraph class from the previous artifact
 
 # Create visualizer
-viz = GraphVisualizer(graph)
+viz = GraphVisualizer(f_graph)
 
 # print("1. Basic Matplotlib Visualization:")
 # viz.basic_matplotlib_viz()
@@ -59,8 +60,8 @@ viz.interactive_plotly_viz()
 print("\n4. Adjacency Matrix:")
 viz.adjacency_matrix_viz()
 
-adj_mat = nx.adjacency_matrix(graph)
-ftr_mat = nx.attr_matrix(graph)
+adj_mat = nx.adjacency_matrix(f_graph)
+ftr_mat = nx.attr_matrix(f_graph)
 print(adj_mat)
 print("\n" + "="*50 + "\n")
 print(ftr_mat)

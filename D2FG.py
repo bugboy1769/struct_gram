@@ -52,6 +52,62 @@ class DF2G:
                     G.add_edge(f"col_{col}", value_node, edge_type = "contains_value")
         return G
     
+    def _create_entity_centric_graph(self) -> nx.Graph:
+        """
+        Create graph where each row is an entity, columns are attributes.
+        Edges connect entities with shared attribute values.
+        """
+        G = nx.Graph()
+        
+        # Add row nodes (entities)
+        for idx, row in self.df.iterrows():
+            node_id = f"row_{idx}"
+            G.add_node(node_id, 
+                      node_type="entity",
+                      row_index=idx,
+                      attributes=row.to_dict())
+        
+        # Add column nodes (attributes)
+        for col in self.df.columns:
+            col_node = f"col_{col}"
+            G.add_node(col_node,
+                      node_type="attribute",
+                      column_name=col,
+                      data_type=str(self.df[col].dtype),
+                      unique_values=len(self.df[col].unique()),
+                      null_count=self.df[col].isnull().sum())
+        
+        # Connect entities to their attributes
+        for idx, row in self.df.iterrows():
+            row_node = f"row_{idx}"
+            for col, value in row.items():
+                col_node = f"col_{col}"
+                G.add_edge(row_node, col_node,
+                          edge_type="has_attribute",
+                          value=value,
+                          is_null=pd.isna(value))
+        
+        # Connect entities with shared values
+        for col in self.df.columns:
+            value_groups = self.df.groupby(col).groups
+            for value, indices in value_groups.items():
+                if len(indices) > 1 and not pd.isna(value):
+                    # Connect entities sharing this value
+                    indices_list = list(indices)
+                    for i in range(len(indices_list)):
+                        for j in range(i + 1, len(indices_list)):
+                            row1, row2 = f"row_{indices_list[i]}", f"row_{indices_list[j]}"
+                            if G.has_edge(row1, row2):
+                                G[row1][row2]['shared_attributes'].append(col)
+                                G[row1][row2]['shared_values'].append(value)
+                            else:
+                                G.add_edge(row1, row2,
+                                          edge_type="shares_value",
+                                          shared_attributes=[col],
+                                          shared_values=[value])
+        
+        return G
+    
     def _create_value_based_graph(self) -> nx.Graph:
         """
         Create graph focusing on value relationships across the table.
@@ -93,7 +149,39 @@ class DF2G:
         
         return G
 
-    
+
+    def create_column_graph(self) -> nx.Graph:
+
+        G = nx.Graph()
+
+        for col in self.df.columns:
+            col_stats = self._get_col_stats(col)
+            G.add_node(f"col_{col}", node_type = "column", **col_stats)
+        
+        #Add Edges based on stat relns
+        numeric_cols = self.df.select_dtypes(include=[np.number]).columns
+        if len(numeric_cols) > 1:
+            corr_matrix = self.df[numeric_cols].corr()
+            for i, col1 in enumerate(numeric_cols):
+                for j, col2 in enumerate(numeric_cols):
+                    if i < j:
+                        corr = corr_matrix.loc[col1, col2]
+                        if abs(corr) > 0.1: #significance
+                            G.add_edge(f"col_{col1}", f"col_{col2}", edge_type = "corr", corr = corr, strength = abs(corr))
+        #Add Edges for dtype relns
+        dtype_groups = self.df.dtypes.groupby(self.df.dtypes).groups
+        for dtype, cols in dtype_groups.items():
+            if len(cols) > 1:
+                col_list = list(cols)
+                for i in range(len(col_list)):
+                    for j in range(i + 1, len(col_list)):
+                        col1, col2 = col_list[i], col_list[j]
+                        if not G.has_edge(f"col_{col1}", f"col_{col2}"):
+                            G.add_edge(f"col_{col1}", f"col_{col2}", edge_type = "has_dtype", dtype = str(dtype), weight = 0.5)
+        return G
+
+
+
     def _get_col_stats(self, col):
         series = self.df[col]
         stats = {
@@ -129,6 +217,36 @@ class DF2G:
             return value.lower().strip()
         else:
             return str(value)
+    
+    def apply_force_directed_layout(self, G: nx.Graph, iterations: int = 50, k: float = None) -> nx.Graph:
+        """
+        Apply spring/force-directed layout to compute node positions.
+        This uses NetworkX's spring layout algorithm.
+        """
+        # Compute spring layout positions
+        pos = nx.spring_layout(
+            G, 
+            iterations=iterations,
+            k=k,  # Optimal distance between nodes
+            weight='weight',  # Use edge weights if available
+            seed=42  # For reproducibility
+        )
+        
+        # Add position coordinates as node features
+        for node in G.nodes():
+            x, y = pos[node]
+            G.nodes[node]['pos_x'] = x
+            G.nodes[node]['pos_y'] = y
+            
+            # # Optionally add position to feature vector
+            # original_features = G.nodes[node]['features']
+            # enhanced_features = original_features + [x, y]
+            # G.nodes[node]['features'] = enhanced_features
+        
+        # # Update feature dimension
+        # self.feature_dim = len(enhanced_features)
+        
+        return G
     
     def get_graph_summary(self, G: nx.Graph) -> dict[str, any]:
         node_types = {}
