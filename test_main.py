@@ -21,8 +21,8 @@ sample_data = {
     }
 
 df = pd.read_csv('customer.csv')
-dfs = df[:10]
-    
+dfs = df[:15]
+
 print("Original DataFrame:")
 print(dfs)
 print("\n" + "="*50 + "\n")
@@ -30,14 +30,16 @@ print("\n" + "="*50 + "\n")
 converter = DF2G(dfs)
 graph = converter.create_column_graph()
 f_graph = converter.apply_force_directed_layout(graph, iterations=20)
+print("\n" + "="*50 + "\n")
 summary = converter.get_graph_summary(graph)
 
 print(f"Graph Summary:\n{summary}")
 print("\n" + "="*50 + "\n")
-print(f"Sample nodes: {list(graph.nodes())[:5]}")
-print(f"Sample edges: {list(graph.edges())[:5]}")
+print(f"Sample nodes: {list(graph.nodes())[:10]}")
+print(f"Sample edges: {list(graph.edges())[:10]}")
 print("\n" + "-"*30 + "\n")
-
+# print(graph.nodes['features'])
+# print("\n" + "-"*30 + "\n")
 
 """
 Complete example showing how to visualize graphs created from DataFrames.
@@ -46,7 +48,7 @@ Complete example showing how to visualize graphs created from DataFrames.
 # Assuming you have the DataFrameToGraph class from the previous artifact
 
 # Create visualizer
-viz = GraphVisualizer(f_graph)
+viz = GraphVisualizer(graph)
 
 # print("1. Basic Matplotlib Visualization:")
 # viz.basic_matplotlib_viz()
@@ -60,16 +62,15 @@ viz.interactive_plotly_viz()
 print("\n4. Adjacency Matrix:")
 viz.adjacency_matrix_viz()
 
-adj_mat = nx.adjacency_matrix(f_graph)
-ftr_mat = nx.attr_matrix(f_graph)
+adj_mat = nx.adjacency_matrix(graph)
+ftr_mat = nx.attr_matrix(graph)
 print(adj_mat)
 print("\n" + "="*50 + "\n")
 print(ftr_mat)
 
 # het_g = encode_het_nodes(graph)
-# # torch_graph = networkx_to_torch_geometric(graph)
+torch_graph = networkx_to_torch_geometric(graph)
+
 # print('\n' + "="*50 + '\n')
 # print(f"Sample nodes: {list(het_g.nodes())[:5]}")
 # print(f"Sample edges: {list(het_g.edges())[:5]}")
-
-

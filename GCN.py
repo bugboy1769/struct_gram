@@ -40,13 +40,13 @@ def networkx_to_torch_geometric(G):
     for node in sorted(G.nodes()):
         features.append(G.nodes[node]['features'])
     #Convert to Tensor
-    data.x = torch.Tensor(features, dtype = torch.float)
+    data.x = torch.tensor(features, dtype = torch.float)
 
     return data
 
-def embed_graph(G, embedding_dim = 32):
+def gcn_forward_pass(G, embedding_dim = 32):
 
-    data = networkx_to_torch_geometric(G)
+    data = G
 
     num_nodes = data.x.shape[0]
     input_dim = data.x.shape[1]
@@ -74,8 +74,4 @@ def encode_het_nodes(G, encoder_model = 'all-MiniLM-L6-v2'):
         node_text = str(G.nodes[node].get('text', f"node_{node}"))
         embedding = encoder.encode(node_text)
         G.nodes[node]['features'] = embedding.tolist()
-
-
-
-
-
+    return G
