@@ -66,7 +66,7 @@ def gcn_forward_pass(G, embedding_dim = 32):
     with torch.no_grad():
         embeddings = model(data.x, data.edge_index)
     
-    return embeddings.numpy(), model
+    return embeddings, model
 
 def encode_het_nodes(G, encoder_model = 'all-MiniLM-L6-v2'):
     encoder = SentenceTransformer(encoder_model)

@@ -7,6 +7,8 @@ import fasttext as ft
 import fasttext.util as ftu
 import math
 from sentence_transformers import SentenceTransformer
+from transformers import T5ForConditionalGeneration, T5Tokenizer, T5EncoderModel, AutoTokenizer
+
 #Schema Aware Representation
 class DF2G:
 
@@ -16,7 +18,9 @@ class DF2G:
         self.node_atts = {}
         self.edge_atts = {}
         # self.ft_embedder = ft.load_model('cc.en.300.bin')
-        self.st_embedder = SentenceTransformer('all-MiniLM-L6-v2')
+        self.tokenizer = AutoTokenizer.from_pretrained("t5-small")
+        self.st_embedder = T5ForConditionalGeneration.from_pretrained('t5-small')
+    
 
     def schema_graph(self) -> nx.Graph:
 
@@ -380,7 +384,8 @@ class DF2G:
             # Text embeddings (300d each)
             for feat in text_features:
                 value = attrs.get(feat, "unknown")  # Default value for missing text features
-                text_embedding = self.st_embedder.encode(str(value)).tolist()
+                text_input_ids = self.tokenizer(value, return_tensors="pt").input_ids
+                text_embedding = self.st_embedder.generate(text_input_ids)
                 feature_vector.extend(text_embedding)
             
             # # Numerical embeddings (300d each) - FIXED: Now inside the node loop
@@ -440,7 +445,9 @@ class DF2G:
                 
                 # Edge type embedding (300d)
                 edge_type = attrs.get('edge_type', 'unknown')
-                type_embedding = self.st_embedder.encode(f"edge_type_{edge_type}").tolist()
+                text_input_ids = self.tokenizer(edge_type, return_tensors="pt").input_ids
+                # text_embedding = self.st_embedder.generate(text_input_ids)
+                type_embedding = self.st_embedder.generate(text_input_ids).tolist()
                 edge_vector.extend(type_embedding)
                 
                 # Numerical edge attributes (300d each)
@@ -454,7 +461,9 @@ class DF2G:
                 
                 # Categorical edge attributes (300d)
                 dtype_value = attrs.get('dtype', 'unknown')
-                dtype_embedding = self.st_embedder.encode(f"dtype_{dtype_value}").tolist()
+                text_input_ids = self.tokenizer(dtype_value, return_tensors="pt").input_ids
+                # text_embedding = self.st_embedder.generate(text_input_ids)
+                dtype_embedding = self.st_embedder.generate(text_input_ids).tolist()
                 edge_vector.extend(dtype_embedding)
                 
                 G[u][v]['edge_features'] = edge_vector

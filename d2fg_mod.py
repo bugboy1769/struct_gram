@@ -24,7 +24,7 @@ class DF2G_Mod:
         G = nx.Graph()
 
         for col in self.df.columns:
-            col_stats = self._get_col_stats(self.df[col])
+            col_stats = self._get_col_stats(col)
             G.add_node(f"col_{col}", node_type = "column", **col_stats)
         
         numeric_cols = self.df.select_dtypes(include=np.number).columns
@@ -48,24 +48,36 @@ class DF2G_Mod:
                         if not G.has_edge(f"col_{col1}", f"col_{col2}"):
                             G.add_edge(f"col_{col1}", f"col_{col2}", edge_type = "dtype", dtype = str(dtype), weight = 0.5)
 
+        G = self._homogenise_features(G)
         return G
 
     def _get_col_stats(self, col):
         series = self.df[col]
         stats = {
-            'column_name': col,
-            'data_type': str(series.dtype),
-            'unique_count': len(series.unique()),
-            'null_count': series.isnull().sum(),
-            'null_percentage': series.isnull().mean(),
-        }
+            'column_name': f"Column Name_: {col}",
+            'data_type': f"Column Data Type_: {str(series.dtype)}",
+            'unique_count': f"Unique Values in Column_: {len(series.unique())}",
+            'null_count': f"Null Values in Column_: {series.isnull().sum()}",
+            'null_percentage': f"Null Percentage in Column_: {series.isnull().mean()}",
+            }
         if pd.api.types.is_numeric_dtype(series):
             stats.update({
-                'mean': series.mean(),
-                'median': series.median(),
-                'std': series.std(),
-                'min': series.min(),
-                'max': series.max(),
+                'mean': f"Mean of Column_: {series.mean()}",
+                'median': f"Median of Column_: {series.median()}",
+                'std_dev': f"Standard Deviation of Column_: {series.std()}",
+                'min': f"Minimum of Column_: {series.min()}",
+                'max': f"Maximum of Column_: {series.max()}",
+            })
+        if pd.api.types.is_string_dtype(series):
+
+            digit_pattern = r'\d'
+            special_char_pattern = r'[^a-zA-Z0-9\s]'
+
+            stats.update({
+                'avg_length': f"Average Length of Column_: {series.str.len().mean()}",
+                'max_length': f"Maximum Length of Column_: {series.str.len().max()}",
+                'contains_numbers': f"Contains Numbers: {series.str.contains(digit_pattern).any()}",
+                'contains_sp_chars': f"Contains Special Characters: {series.str.contains(special_char_pattern).any()}"
             })
         return stats
     
@@ -87,40 +99,11 @@ class DF2G_Mod:
         exclude_keys = {'node_type', 'column_name'}
         feature_keys = sorted(all_features - exclude_keys)
 
-        text_features = ['data_type']
-        numerical_features = [key for key in feature_keys if key not in text_features]
-        boolean_features = ['contains_numbers']
+        text_features = ['data_type', 'unique_count', 'null_count', 'null_percentage', 
+            'mean', 'median', 'std_dev', 'min', 'max',  # numeric-only features
+            'avg_length', 'max_length', 'contains_numbers', 'contains_sp_chars']
 
-        all_numerical_values = {}
-        for feature in numerical_features:
-            values = []
-            for node, attrs in G.nodes(data=True):
-                if feature in attrs and attrs[feature] is not None and not pd.isna(attrs[feature]):
-                    values.append(float(attrs[feature]))
-            if values:
-                all_numerical_values[feature] = {
-                    'min': min(values),
-                    'max': max(values),
-                    'mean': np.mean(values),
-                }
-        def _positional_encoding(value, feature_name, d_model = 300): #d_model will change to fit the projection layer
-            if feature_name not in all_numerical_values:
-                return [0.0] * d_model
-            
-            feature_stats = all_numerical_values[feature_name]
-            if feature_stats['max'] == feature_stats['min']:
-                normalised = 0.5
-            else:
-                normalised = (value -feature_stats['min'])/ (feature_stats['max' - feature_stats['min']]) #can use sigmoid etc?
-            
-            encoding = []
-            for i in range(d_model):
-                if i % 2 == 0:
-                    encoding.append(math.sin(normalised * (10000 ** (i/d_model)))) #reminiscent of pos encoding in transformers
-                else:
-                    encoding.append(math.cos(normalised * (10000 ** (i/d_model))))
-            return encoding
-            
+    
         # FIXED: Process each node within the loop
         for node, attrs in G.nodes(data=True):
             feature_vector = []
@@ -130,30 +113,6 @@ class DF2G_Mod:
                 value = attrs.get(feat, "unknown")  # Default value for missing text features
                 text_embedding = self.st_embedder.encode(str(value)).tolist()
                 feature_vector.extend(text_embedding)
-            
-            # Numerical embeddings (300d each) - FIXED: Now inside the node loop
-            for feat in numerical_features:
-                value = attrs.get(feat, None)
-                if value is not None and not pd.isna(value):
-                    # Positional encoding for numerical data
-                    numerical_embedding = _positional_encoding(float(value), feat)
-                else:
-                    # Default zero embedding for missing numerical features
-                    numerical_embedding = [0.0] * 300
-                feature_vector.extend(numerical_embedding)
-            
-            # Boolean embeddings (300d each) - FIXED: Now inside the node loop
-            for feat in boolean_features:
-                value = attrs.get(feat, None)
-                if value is not None:
-                    # Convert boolean to descriptive text and embed
-                    text_repr = f"{feat}_{'yes' if value else 'no'}"
-                    boolean_embedding = self.st_embedder.encode(text_repr).tolist()
-                else:
-                    # Default embedding for missing boolean features
-                    text_repr = f"{feat}_unknown"
-                    boolean_embedding = self.st_embedder.encode(text_repr).tolist()
-                feature_vector.extend(boolean_embedding)
             
             # Assign the complete feature vector to the node
             G.nodes[node]['features'] = feature_vector
@@ -191,14 +150,6 @@ class DF2G_Mod:
                 type_embedding = self.st_embedder.encode(f"edge_type_{edge_type}").tolist()
                 edge_vector.extend(type_embedding)
                 
-                # Numerical edge attributes (300d each)
-                for attr in ['corr', 'strength', 'weight']:
-                    value = attrs.get(attr, 0.0)
-                    if value is None or pd.isna(value):
-                        value = 0.0
-                    # Simple numerical encoding
-                    attr_embedding = [float(value)] * 300
-                    edge_vector.extend(attr_embedding)
                 
                 # Categorical edge attributes (300d)
                 dtype_value = attrs.get('dtype', 'unknown')
@@ -213,12 +164,10 @@ class DF2G_Mod:
         G = clean_attributes(G)
 
         # Update graph metadata
-        total_dim = len(text_features) * 300 + len(numerical_features) * 300 + len(boolean_features) * 300
+        total_dim = len(text_features) * 300
         G.graph['feature_dim'] = total_dim
         G.graph['feature_composition'] = {
             'text_features': text_features,
-            'numerical_features': numerical_features, 
-            'boolean_features': boolean_features,
             'embedding_dims': {'text': 300, 'numerical': 300, 'boolean': 300}
         }
 
