@@ -3,13 +3,35 @@ import torch.nn as nn
 import torch
 import numpy as np
 
-class T5Decoder(nn.Module):
+
+class EmbeddingToLogits(nn.Module):
+    def __init__(self, embedding_dim, vocab_size):
+        super().__init__()
+        self.projection = nn.Linear(embedding_dim, vocab_size)
+    
+    def forward(self, embeddings):
+        # embeddings: [num_nodes, embedding_dim]
+        logits = self.projection(embeddings)  # [num_nodes, vocab_size]
+        token_ids = torch.argmax(logits, dim=-1)  # [num_nodes]
+        return token_ids
+
+def map_embeddings_to_tokens(embeddings, tokenizer):
+    vocab_size = tokenizer.vocab_size
+    embedding_dim = embeddings.shape[1]
+    
+    mapper = EmbeddingToLogits(embedding_dim, vocab_size)
+    token_ids = mapper(embeddings)
+    
+    return token_ids.tolist()
+
+class T5Decoder(nn.Module, EmbeddingToLogits):
 
     def __init__(self, projection_layer_output_dim = 32, t5_model_name = 't5-small'):
-        super(T5Decoder, self).__init__()
+        super().__init__()
         self.T5Model = T5ForConditionalGeneration.from_pretrained(t5_model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(t5_model_name)
         self.embedding_to_features = nn.Linear(projection_layer_output_dim, 8)
+        self.logit_creator = EmbeddingToLogits(8, self.tokenizer.vocab_size) #Fix fix fix
 
     def embedding_to_prompt(self, embeds):
         features = self.embedding_to_features(embeds)
@@ -99,13 +121,13 @@ class EmbeddingToLogits(nn.Module):
         token_ids = torch.argmax(logits, dim=-1)  # [num_nodes]
         return token_ids
 
-def map_embeddings_to_tokens(embeddings, tokenizer):
-    vocab_size = tokenizer.vocab_size
-    embedding_dim = embeddings.shape[1]
-    
-    mapper = EmbeddingToLogits(embedding_dim, vocab_size)
-    token_ids = mapper(embeddings)
-    
-    return token_ids.tolist()
+    def map_embeddings_to_tokens(embeddings, tokenizer):
+        vocab_size = tokenizer.vocab_size
+        embedding_dim = embeddings.shape[1]
+        
+        mapper = EmbeddingToLogits(embedding_dim, vocab_size)
+        token_ids = mapper(embeddings)
+        
+        return token_ids.tolist()
 
         

@@ -50,13 +50,13 @@ mid_decoder_output = mid_decoder.forward(embeds)
 print("\n" + "="*50 + "\n")
 print(mid_decoder_output)
 
-projection_layer = SemanticMLP()
-projection_layer_output = projection_layer.forward(embeds)
-print("\n" + "="*50 + "\n")
+# projection_layer = SemanticMLP()
+# projection_layer_output = projection_layer.forward(embeds)
+# print("\n" + "="*50 + "\n")
 
-decoder = T5Decoder()
-decoder_output = decoder.forward(projection_layer_output)
-print(decoder_output)
+# decoder = T5Decoder()
+# decoder_output = decoder.forward(projection_layer_output)
+# print(decoder_output)
 
 
 # response = local_model.invoke(f"Look at these embeddings{decoder_output} and tell me what you understand")
