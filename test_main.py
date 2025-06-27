@@ -4,7 +4,7 @@ import pandas as pd
 import networkx as nx
 import matplotlib.pyplot as plt
 import scipy as sp
-from GCN import GCNEncoder, embed_graph, networkx_to_torch_geometric, encode_het_nodes
+from GCN import GCNEncoder, gcn_forward_pass, networkx_to_torch_geometric, encode_het_nodes
 import torch
 import torch.nn as nn
 from torch_geometric.nn import GCNConv

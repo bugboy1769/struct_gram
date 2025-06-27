@@ -24,7 +24,7 @@ def map_embeddings_to_tokens(embeddings, tokenizer):
     
     return token_ids.tolist()
 
-class T5Decoder(nn.Module, EmbeddingToLogits):
+class T5Decoder(nn.Module):
 
     def __init__(self, projection_layer_output_dim = 32, t5_model_name = 't5-small'):
         super().__init__()
