@@ -123,32 +123,42 @@ def feature_tokenizer(stat_dict):
         return_tensors = 'pt'
     )
     tokens = tokens.to(device)
+    #This is essentially my projection layer for now
     with torch.no_grad():
         embeddings = model.get_input_embeddings()(tokens['input_ids'])
         pooled = embeddings.mean(dim = 1).squeeze(0)
     return pooled
 
-def nx_to_pyg(graph, node_features_list, edge_features_dict):
+def nx_to_pyg(graph, node_features):
 
     node_to_idx = {node: idx for idx, node in enumerate(graph.nodes())}
-    if isinstance(node_features_list, list):
-        node_features = torch.stack(node_features_list)
 
     edge_list = []
     edge_features_list = []
 
-    for edge in graph.edges():
-        src = node_to_idx[edge[0]]
-        dst = node_to_idx[edge[1]]
+    for u, v, data in graph.edges(data=True):
+        src = node_to_idx[u]
+        dst = node_to_idx[v]
 
-        edge_features = edge_features_dict.get(edge, torch.zeros(768).to(device))
+        if 'relationship' in data:
+            edge_feat = data['relationship']
+
+            if edge_feat.dim() == 0:
+                edge_feat = edge_feat.unsqueeze(0)
+            
+            with torch.no_grad():
+                embeddings = model.get_input_embeddings()(edge_feat.unsqueeze(0))
+                edge_feat = embeddings.mean(dim=1).squeeze(0)
+        else:
+            edge_feat = torch.zeros(786).to(device)
+        
         edge_list.append([src, dst])
         edge_list.append([dst, src])
-        edge_features_list.append(edge_features)
-        edge_features_list.append(edge_features)
+        edge_features_list.append(edge_feat)
+        edge_features_list.append(edge_feat)
     
     edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous()
-    edge_attr = torch.stack(edge_features_list)
+    edge_attr = torch.stack(edge_features_list) if edge_features_list else None
 
     data = Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr)
 
@@ -156,7 +166,7 @@ def nx_to_pyg(graph, node_features_list, edge_features_dict):
 
 
 graph, feature_tensor = table_to_graph(truncated_df)
-pyg, node_idx = nx_to_pyg(graph, feature_tensor, {})
+pyg, node_idx = nx_to_pyg(graph, feature_tensor)
 print(f"Pytorch Geometric Graph: {pyg}")
 print(f"Node Index Mapping: {node_idx}")
 #print(get_graph_summary(graph))
