@@ -12,3 +12,7 @@
 ToDo: Finalise Features and feature vector encoding method. Setup projection layer.
 
 Note: The one to many mapping is quite reductive, a much better approach would be to have different super tokens using a variety of {feature_vectors:aggregation_method} combinations. Also note, the only trainable object here for now is the projection layer and this is not graph querying, its passive context creation attempting to capture structured data semantics.
+
+Getting to GCN:
+Text stats → Tokens → Token embeddings → Pool → Node features → GCN → Node embeddings → Pool → Graph embedding → MLP → LLM
+           (many tokens)              (1 per node)        (1 per node)           (1 for graph)
