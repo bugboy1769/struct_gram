@@ -21,3 +21,5 @@ The current graph state looks something like this:
 
 <img width="640" height="480" alt="good_graph" src="https://github.com/user-attachments/assets/5d6b5f17-a8a8-484d-b1b3-f5a853f25709" />
 
+I am too lazy to show the edge features in the visualization but the edges have relationality features as well.
+
