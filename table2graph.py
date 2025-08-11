@@ -17,17 +17,19 @@ path = "customer.csv"
 df = pd.read_csv(path)
 truncated_df = df [:15]
 # print(f"Original DataFrame: {truncated_df}")
+PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
 
 model_dict = {
     "m1": "gpt2",
     "m2": "HuggingFaceTB/SmolLM-135M",
     "m3": "meta-llama/Llama-3.1-8B",
     "m4": "google-t5/t5-small",
+    "m5": "meta-llama/Llama-3.2-3B",
 }
 
 
-model = AutoModelForCausalLM.from_pretrained(model_dict["m2"]) #, local_files_only = True)
-tokenizer = AutoTokenizer.from_pretrained(model_dict["m2"]) #, local_files_only = True)
+model = AutoModelForCausalLM.from_pretrained(model_dict["m5"]) #, local_files_only = True)
+tokenizer = AutoTokenizer.from_pretrained(model_dict["m5"]) #, local_files_only = True)
 tokenizer.pad_token = tokenizer.eos_token
 device = ("mps" if torch.backends.mps.is_available() else "cpu")
 model = model.to(device)
@@ -236,23 +238,23 @@ query_embeds = model.get_input_embeddings()(query_tokens['input_ids']).to(device
 print(f"QE Shape {query_embeds.shape}")
 #print(f"Query Embeds: {query_embeds}")
 
-def generate_tokens(inputs, past_kv):
+def generate_tokens(inputs):
     with torch.no_grad():
-        outputs = model(inputs_embeds = inputs, past_key_values = past_kv, use_cache = True) # Because feedforward, we don't need pytorch to update or store grads
+        outputs = model(inputs_embeds = inputs, use_cache = False) # Because feedforward, we don't need pytorch to update or store grads
         logits = outputs.logits #Storing all the logits that the model produces
-        past_kv = outputs.past_key_values
+        #past_kv = outputs.past_key_values
         last_logits = logits[0, -1, :] #Pick out the final logit as we are doing autoregressive generation
         next_token_id = last_logits.argmax() #Applying argmax to sample out the most likely token_id
 
-    return next_token_id, past_kv
+    return next_token_id
 
 def generate_output(feature_tensor): 
     generated_tokens = []
     duration_s = []
     past_kv = None
     current_embeds = feature_tensor.unsqueeze(0)
-    for _ in range(15):
-        next_token_id, past_kv = generate_tokens(current_embeds, past_kv) # Generate next_token_id
+    for _ in range(50):
+        next_token_id = generate_tokens(current_embeds) # Generate next_token_id
         generated_tokens.append(next_token_id.item())
         next_embed = model.get_input_embeddings()(next_token_id.unsqueeze(0))
         next_embed = next_embed.unsqueeze(0)
