@@ -16,3 +16,10 @@ Note: The one to many mapping is quite reductive, a much better approach would b
 Getting to GCN:
 Text stats → Tokens → Token embeddings → Pool → Node features → GCN → Node embeddings → Pool → Graph embedding → MLP → LLM
            (many tokens)              (1 per node)        (1 per node)           (1 for graph)
+
+The current graph state looks something like this:
+
+<img width="640" height="480" alt="good_graph" src="https://github.com/user-attachments/assets/5d6b5f17-a8a8-484d-b1b3-f5a853f25709" />
+
+I am too lazy to show the edge features in the visualization but the edges have relationality features as well.
+
