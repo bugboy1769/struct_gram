@@ -10,7 +10,6 @@ from torch_geometric.data import Data
 from gcn_conv import TableGCN
 from projection_layer import LLMProjector
 import time
-from langchain_ollama import OllamaLLM
 
 
 path = "customer.csv"
@@ -18,6 +17,10 @@ df = pd.read_csv(path)
 truncated_df = df [:15]
 # print(f"Original DataFrame: {truncated_df}")
 PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
+
+print(f"CUDA available: {torch.cuda.is_available()}")
+print(f"CUDA device count: {torch.cuda.device_count()}")
+print(f"Current device: {torch.cuda.current_device()}")
 
 model_dict = {
     "m1": "gpt2",
@@ -31,7 +34,7 @@ model_dict = {
 model = AutoModelForCausalLM.from_pretrained(model_dict["m5"]) #, local_files_only = True)
 tokenizer = AutoTokenizer.from_pretrained(model_dict["m5"]) #, local_files_only = True)
 tokenizer.pad_token = tokenizer.eos_token
-device = ("mps" if torch.backends.mps.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = model.to(device)
 
 def table_to_graph(df):
@@ -51,7 +54,7 @@ def table_to_graph(df):
     for features in node_features:
         current_length = features.shape[1]
         if current_length < max_length:
-            padding = torch.zeros(1, max_length - current_length, 576).to(device)
+            padding = torch.zeros(1, max_length - current_length, 3072, device=device).to(device)
             padded = torch.cat([features, padding], dim = 1)
         else:
             padded = features
@@ -110,6 +113,8 @@ def create_and_connect_edges(graph: nx.Graph, df):
     col_relns = generate_batch_without_decode(prompt_list)
     #print(f"Column Relationships: {col_relns}")
     for i, tuple in enumerate(unique_tuples):
+        edge_tokens = tokenizer("relationship", padding=True, return_tensors='pt')
+        edge_tokens = {k: v.to(device) for k, v in edge_tokens.items()}
         graph.add_edge(f"col_{tuple[0]}", f"col_{tuple[1]}", edge_type = tokenizer("relationship", padding = True, return_tensors = 'pt'), relationship = col_relns[i])
     
 def get_graph_summary(G: nx.Graph) -> dict[str, any]:
@@ -142,7 +147,7 @@ def feature_tokenizer(stat_dict):
         padding = True,
         return_tensors = 'pt'
     )
-    tokens = tokens.to(device)
+    tokens = {k: v.to(device) for k, v in tokens.items()}
     #This is essentially my projection layer for now
     with torch.no_grad():
         embeddings = model.get_input_embeddings()(tokens['input_ids'])
@@ -167,8 +172,10 @@ def nx_to_pyg(graph, node_features):
             if edge_feat.dim() == 0: #changed dim to shape
                 edge_feat = edge_feat.unsqueeze(0)
             
+            edge_feat = edge_feat.to(device)
+
             with torch.no_grad():
-                embeddings = model.get_input_embeddings()(edge_feat.unsqueeze(0))
+                embeddings = model.get_input_embeddings()(edge_feat.unsqueeze(0)).to(device)
                 edge_feat = embeddings.mean(dim=1).squeeze(0)
         else:
             embeddimg_dim = model.get_input_embeddings().embedding_dim
@@ -232,7 +239,7 @@ print(f"Table Context Shape: {table_context.shape}")
 
 #appending table context to tokenised query
 
-query = "Tell me a story, given,: "
+query = "You are being presented an aggregated sentence which represents the aggregation of a csv table, which was converted to a graph where the nodes are the columns. Your job is to look at these text node features and give me a total summary of the table: "
 query_tokens = tokenizer(query, padding = True, return_tensors = 'pt').to(device)
 query_embeds = model.get_input_embeddings()(query_tokens['input_ids']).to(device)
 print(f"QE Shape {query_embeds.shape}")
@@ -240,7 +247,7 @@ print(f"QE Shape {query_embeds.shape}")
 
 def generate_tokens(inputs):
     with torch.no_grad():
-        outputs = model(inputs_embeds = inputs, use_cache = False) # Because feedforward, we don't need pytorch to update or store grads
+        outputs = model(inputs_embeds = inputs.to(device), use_cache = False) # Because feedforward, we don't need pytorch to update or store grads
         logits = outputs.logits #Storing all the logits that the model produces
         #past_kv = outputs.past_key_values
         last_logits = logits[0, -1, :] #Pick out the final logit as we are doing autoregressive generation
@@ -253,7 +260,7 @@ def generate_output(feature_tensor):
     duration_s = []
     past_kv = None
     current_embeds = feature_tensor.unsqueeze(0)
-    for _ in range(50):
+    for _ in range(100):
         next_token_id = generate_tokens(current_embeds) # Generate next_token_id
         generated_tokens.append(next_token_id.item())
         next_embed = model.get_input_embeddings()(next_token_id.unsqueeze(0))
