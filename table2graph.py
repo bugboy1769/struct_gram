@@ -273,7 +273,7 @@ print(f"Test Node Shape: {test_node[0].shape}")
 combined_embeds = torch.concat([query_embeds, test_node[0]], dim = 1).squeeze(0).to(device)
 print(f"Combined Embeds: {combined_embeds.shape}")
 
-print(f"ft0Shape: {feature_tensor.squeeze(0).shape}")
+print(f"ft0Shape: {feature_tensor.shape}")
 
 def feature_concat (feature_tensor):
     num_nodes, seq_len, embeddimg_dim = feature_tensor.shape
@@ -282,5 +282,5 @@ def feature_concat (feature_tensor):
     return concat_features
 concat_features = feature_concat (feature_tensor)
 print(f"concat_features: {concat_features.shape}")
-generated_tokens, generated_words = generate_output(concat_features) #input dim = [seq_len, embedding_dim]
+generated_tokens, generated_words = generate_output(combined_embeds) #input dim = [seq_len, embedding_dim]
 print(f"Gen Word: {generated_words}")
