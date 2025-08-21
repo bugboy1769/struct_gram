@@ -1,0 +1,29 @@
+Save Routine:
+
+# At end of each work session:
+cd /root/struct_gram
+
+# Check what changed:
+git status
+git diff  # See exact changes
+
+# Add and commit:
+git add .
+git commit -m "Progress on [describe what you worked on]"
+
+# Push to your branch:
+git push origin runpod-gpu-fixes
+
+Load Routine:
+
+# Clone your repo:
+git clone https://github.com/bugboy1769/struct_gram.git
+cd struct_gram
+
+# Switch to your working branch:
+git checkout runpod-gpu-fixes
+
+# Install dependencies:
+pip install -r requirements.txt  # (create this file if needed)
+
+# Continue working...
