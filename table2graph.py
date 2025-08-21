@@ -40,18 +40,19 @@ model = model.to(device)
 def table_to_graph(df):
 
     G = nx.Graph()
-    node_features = []
+    node_features_list = []
     max_length = 0
     for col in df.columns:
         col_stats = get_col_stats(df, col)
+        #node_name = 
         G.add_node(f"col_{col}", node_type = "column", **col_stats)
-        tensor_features = column_feature_tokenizer_and_concatenator(col_stats)
-        print(f"Tensor Features Shape: {tensor_features.shape}" + separator_string)
-        node_features.append(tensor_features) #a list of tensors of shape [1, seq_len, embedding_dim]
-        max_length = max(max_length, tensor_features.shape[1])
+        feature_embeddings = column_feature_embedder_and_concatenator(col_stats)
+        print(f"Tensor Features Shape: {feature_embeddings.shape}" + separator_string)
+        node_features_list.append(feature_embeddings) #a list of tensors of shape [1, seq_len, embedding_dim]
+        max_length = max(max_length, feature_embeddings.shape[1])
     
     padded_features = []
-    for features in node_features:
+    for features in node_features_list:
         current_length = features.shape[1]
         if current_length < max_length:
             padding = torch.zeros(1, max_length - current_length, 3072, device=device).to(device)
@@ -64,7 +65,7 @@ def table_to_graph(df):
     create_and_connect_edges (G, df)
     node_features_tensor = torch.stack(padded_features)   
 
-    return G, node_features_tensor, node_features
+    return G, node_features_tensor, node_features_list
 
 def get_col_stats(df, col):
 
@@ -108,14 +109,16 @@ def create_and_connect_edges(graph: nx.Graph, df):
     unique_tuples = list(itertools.combinations(column_names, 2))
     prompt_list = []
     for tuple in unique_tuples:
-        prompt = f"Complete the sentence, the relationship of {str(tuple[0])} and {str(tuple[1])} is "
+        print(f"Tuples: {str(tuple[0])} and {str(tuple[1])}" + separator_string)
+        prompt = f" The following are columns names in a table. Rate the semantic relationship strength of {str(tuple[0])} and {str(tuple[1])} using Low, Medium and Strong. Reply with only the rating. "
         prompt_list.append(prompt)
-    col_relns = generate_batch_without_decode(prompt_list)
-    #print(f"Column Relationships: {col_relns}")
+    col_reln_token_ids, col_reln_tokens = generate_batch_without_decode(prompt_list)
+    print(f"Column Relationships: {col_reln_tokens}" + separator_string)
     for i, tuple in enumerate(unique_tuples):
         edge_tokens = tokenizer("relationship", padding=True, return_tensors='pt')
         edge_tokens = {k: v.to(device) for k, v in edge_tokens.items()}
-        graph.add_edge(f"col_{tuple[0]}", f"col_{tuple[1]}", edge_type = tokenizer("relationship", padding = True, return_tensors = 'pt'), relationship = col_relns[i])
+        print(f"Edge Tokens: {edge_tokens}" + separator_string)
+        graph.add_edge(f"col_{tuple[0]}", f"col_{tuple[1]}", edge_type = tokenizer("relationship", padding = True, return_tensors = 'pt'), relationship = col_reln_tokens[i])
     
 def get_graph_summary(G: nx.Graph) -> dict[str, any]:
         node_types = {}
@@ -139,15 +142,16 @@ def get_graph_summary(G: nx.Graph) -> dict[str, any]:
             'num_components': nx.number_connected_components(G)
         }
 
-def column_feature_tokenizer_and_concatenator(stat_dict):
-    all_text = "COLUMN INFORMATION: " + "".join([f"{k}: {v}" for k, v in stat_dict.items()])
+def column_feature_embedder_and_concatenator(stat_dict):
+    all_text = "COLUMN INFORMATION: " + " | ".join([f"{k}: {v}" for k, v in stat_dict.items()])
     print(f"all text:{all_text}" + separator_string)
     tokens = tokenizer(
         all_text,
         padding = True,
         return_tensors = 'pt'
     )
-    tokens = {k: v.to(device) for k, v in tokens.items()}
+    print(f"tokens: {tokens}" + separator_string)
+    tokens.to(device)
     #This is essentially my projection layer for now
     with torch.no_grad():
         embeddings = model.get_input_embeddings()(tokens['input_ids'])
@@ -162,12 +166,14 @@ def nx_to_pyg(graph, node_features):
     edge_features_list = []
 
     for u, v, data in graph.edges(data=True):
+        print(f"Edge Data: {data}" + separator_string)
         src = node_to_idx[u]
         dst = node_to_idx[v]
 
         if 'relationship' in data:
-            edge_feat = data['relationship']
-            #print(edge_feat)
+            edge_feat = [data['relationship']]
+            edge_feat = torch.tensor(edge_feat)
+            print(edge_feat)
 
             if edge_feat.dim() == 0: #changed dim to shape
                 edge_feat = edge_feat.unsqueeze(0)

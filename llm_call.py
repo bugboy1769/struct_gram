@@ -32,6 +32,6 @@ def generate_batch_without_decode(input):
     next_token_ids = last_logits.argmax(dim =1)
     next_tokens = tokenizer.batch_decode(next_token_ids)
 
-    return next_token_ids
+    return next_token_ids, next_tokens
 
 print(generate_batch_without_decode(inputs))

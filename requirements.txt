@@ -1,0 +1,4 @@
+matplotlib
+transformers
+pandas
+torch_geometric
