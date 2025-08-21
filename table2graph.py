@@ -11,7 +11,7 @@ from gcn_conv import TableGCN
 from projection_layer import LLMProjector
 import time
 
-
+separator_string = "\n ------------------------------ \n"
 path = "customer.csv"
 df = pd.read_csv(path)
 truncated_df = df [:15]
@@ -45,8 +45,8 @@ def table_to_graph(df):
     for col in df.columns:
         col_stats = get_col_stats(df, col)
         G.add_node(f"col_{col}", node_type = "column", **col_stats)
-        tensor_features = feature_tokenizer(col_stats)
-        print(f"Tensor Features Shape: {tensor_features.shape}")
+        tensor_features = column_feature_tokenizer_and_concatenator(col_stats)
+        print(f"Tensor Features Shape: {tensor_features.shape}" + separator_string)
         node_features.append(tensor_features) #a list of tensors of shape [1, seq_len, embedding_dim]
         max_length = max(max_length, tensor_features.shape[1])
     
@@ -70,20 +70,20 @@ def get_col_stats(df, col):
 
     series = df[col]
     stats = {
-        "column_name": f"Column Name: {col}",
-        "column_data_type": f"Column Data Type: {str(series.dtype)}",
-        "unique_count": f"Unique Values in the Column: {len(series.unique())}",
-        "null_count:": f"Null Values in the Column: {series.isnull().sum()}"
+        "column_name": col,
+        "column_data_type": str(series.dtype),
+        "unique_count": len(series.unique()),
+        "null_count:": series.isnull().sum(),
     }
     #Numeric DataType Stats: However, there are multiple types of numeric data, not every numeric data has statistical meaning, for example customer_id. however, here, we do it anyway, ideally, we need to bifurcate numerical columns further.
     if pd.api.types.is_numeric_dtype(series):
         stats.update(
             {
-                "mean": f"Mean of Column: {series.mean()}",
-                "standard_deviation": f"Standard Deviation of Column: {series.std()}",
-                "median": f"Median of Column: {series.median()}",
-                "min": f"Minimum Value in Column: {series.min()}",
-                "max": f"Maximum Value in Column: {series.max()}"
+                "mean": series.mean(),
+                "standard_deviation": series.std(),
+                "median": series.median(),
+                "min": series.min(),
+                "max": series.max(),
             }
         )
     if pd.api.types.is_string_dtype(series):
@@ -92,10 +92,10 @@ def get_col_stats(df, col):
         special_char_pattern = r'[^a-zA-Z0-9\s]'
         stats.update(
             {
-                "avg_length": f"Average Length of Column Elements: {series.str.len().mean()}",
-                "max_length": f"Maximum Length of Column Elements: {series.str.len().max()}",
-                "contains_numbers": f"Contains Numbers: {series.str.contains(digit_pattern).any()}",
-                "contains_spl_chars": f"Contains Special Characters: {series.str.contains(special_char_pattern).any()}"
+                "avg_length": series.str.len().mean(),
+                "max_length": series.str.len().max(),
+                "contains_numbers": series.str.contains(digit_pattern).any(),
+                "contains_spl_chars": series.str.contains(special_char_pattern).any(),
             }
         )
     #stats = feature_tokenizer(stats)
@@ -139,9 +139,9 @@ def get_graph_summary(G: nx.Graph) -> dict[str, any]:
             'num_components': nx.number_connected_components(G)
         }
 
-def feature_tokenizer(stat_dict):
-    all_text = "|| Is a Column Node Connected To ||".join([f"{k}: {v}" for k, v in stat_dict.items()])
-    print(f"all text:{all_text}")
+def column_feature_tokenizer_and_concatenator(stat_dict):
+    all_text = "COLUMN INFORMATION: " + "".join([f"{k}: {v}" for k, v in stat_dict.items()])
+    print(f"all text:{all_text}" + separator_string)
     tokens = tokenizer(
         all_text,
         padding = True,
@@ -196,10 +196,10 @@ def nx_to_pyg(graph, node_features):
 
 graph, feature_tensor, test_node = table_to_graph(truncated_df)
 pyg, node_idx = nx_to_pyg(graph, feature_tensor)
-print(f"Pytorch Geometric Graph: {pyg}")
-print(f"Node Index Mapping: {node_idx}")
+print(f"Pytorch Geometric Graph: {pyg}" + separator_string)
+print(f"Node Index Mapping: {node_idx}" + separator_string)
 #print(get_graph_summary(graph))
-print(f"Feature Tensor: {feature_tensor.shape}")
+print(f"Feature Tensor: {feature_tensor.shape}" + separator_string)
 
 # pos = nx.circular_layout(graph)  # or spring_layout, shell_layout, etc.
 # nx.draw(graph, pos, with_labels=True, node_color='lightblue', 
@@ -220,8 +220,8 @@ pyg.edge_index = pyg.edge_index.to(device)
 with torch.no_grad():
     graph_embedding, node_embeddings = gcn_model(pyg.x, pyg.edge_index)
 
-print(f"Graph Embedding Shape: {graph_embedding.shape}")
-print(f"Node Embeddings Shape: {node_embeddings.shape}")
+print(f"Graph Embedding Shape: {graph_embedding.shape}" + separator_string)
+print(f"Node Embeddings Shape: {node_embeddings.shape}" + separator_string)
 
 #initialise and run projection layer
 projector = LLMProjector(gcn_dim=embeddimg_dim, llm_dim=embeddimg_dim)
@@ -235,14 +235,14 @@ for node in node_embeddings:
         table_contexts.append(projection)
 table_context = torch.cat(table_contexts, dim = 0)
 
-print(f"Table Context Shape: {table_context.shape}")
+print(f"Table Context Shape: {table_context.shape}" + separator_string)
 
 #appending table context to tokenised query
 
 query = "You are being presented an aggregated sentence which represents the aggregation of a csv table, which was converted to a graph where the nodes are the columns. Your job is to look at these text node features and give me a total summary of the table: "
 query_tokens = tokenizer(query, padding = True, return_tensors = 'pt').to(device)
 query_embeds = model.get_input_embeddings()(query_tokens['input_ids']).to(device)
-print(f"QE Shape {query_embeds.shape}")
+print(f"QE Shape {query_embeds.shape}" + separator_string)
 #print(f"Query Embeds: {query_embeds}")
 
 def generate_tokens(inputs):
@@ -269,11 +269,11 @@ def generate_output(feature_tensor):
 
     return generated_tokens, tokenizer.decode(generated_tokens)
 
-print(f"Test Node Shape: {test_node[0].shape}")
+print(f"Test Node Shape: {test_node[0].shape}" + separator_string)
 combined_embeds = torch.concat([query_embeds, test_node[0]], dim = 1).squeeze(0).to(device)
-print(f"Combined Embeds: {combined_embeds.shape}")
+print(f"Combined Embeds: {combined_embeds.shape}" + separator_string)
 
-print(f"ft0Shape: {feature_tensor.shape}")
+print(f"ft0Shape: {feature_tensor.shape}" + separator_string)
 
 def feature_concat (feature_tensor):
     num_nodes, seq_len, embeddimg_dim = feature_tensor.shape
@@ -281,6 +281,6 @@ def feature_concat (feature_tensor):
 
     return concat_features
 concat_features = feature_concat (feature_tensor)
-print(f"concat_features: {concat_features.shape}")
+print(f"concat_features: {concat_features.shape}" + separator_string)
 generated_tokens, generated_words = generate_output(combined_embeds) #input dim = [seq_len, embedding_dim]
-print(f"Gen Word: {generated_words}")
+print(f"Gen Word: {generated_words}" + separator_string)
