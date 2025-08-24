@@ -34,7 +34,7 @@ model_dict = {
 model = AutoModelForCausalLM.from_pretrained(model_dict["m5"]) #, local_files_only = True)
 tokenizer = AutoTokenizer.from_pretrained(model_dict["m5"]) #, local_files_only = True)
 tokenizer.pad_token = tokenizer.eos_token
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda")
 model = model.to(device)
 
 def table_to_graph(df):
@@ -117,8 +117,9 @@ def create_and_connect_edges(graph: nx.Graph, df):
     for i, tuple in enumerate(unique_tuples):
         edge_tokens = tokenizer("relationship", padding=True, return_tensors='pt')
         edge_tokens = {k: v.to(device) for k, v in edge_tokens.items()}
+        edge_embeds = model.get_input_embeddings()(edge_tokens) #work to fix this mess
         print(f"Edge Tokens: {edge_tokens}" + separator_string)
-        graph.add_edge(f"col_{tuple[0]}", f"col_{tuple[1]}", edge_type = tokenizer("relationship", padding = True, return_tensors = 'pt'), relationship = col_reln_tokens[i])
+        graph.add_edge(f"col_{tuple[0]}", f"col_{tuple[1]}", edge_type = tokenizer("relationship", padding = True, return_tensors = 'pt'), relationship = edge_embeds)
     
 def get_graph_summary(G: nx.Graph) -> dict[str, any]:
         node_types = {}
@@ -158,7 +159,7 @@ def column_feature_embedder_and_concatenator(stat_dict):
         #pooled = embeddings.mean(dim = 1).squeeze(0)
     return embeddings
 
-def nx_to_pyg(graph, node_features):
+def nx_to_pyg(graph, node_features): #many fixes here
 
     node_to_idx = {node: idx for idx, node in enumerate(graph.nodes())}
 
@@ -171,15 +172,7 @@ def nx_to_pyg(graph, node_features):
         dst = node_to_idx[v]
 
         if 'relationship' in data:
-            edge_feat = [data['relationship']]
-            edge_feat = torch.tensor(edge_feat)
-            print(edge_feat)
-
-            if edge_feat.dim() == 0: #changed dim to shape
-                edge_feat = edge_feat.unsqueeze(0)
-            
-            edge_feat = edge_feat.to(device)
-
+            edge_feat = [data['relationship']]            
             with torch.no_grad():
                 embeddings = model.get_input_embeddings()(edge_feat.unsqueeze(0)).to(device)
                 edge_feat = embeddings.mean(dim=1).squeeze(0)

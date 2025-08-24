@@ -9,8 +9,8 @@ model_dict = {
 }
 
 inputs = ["the brown fox", "boss", "bruh"]
-model = AutoModelForCausalLM.from_pretrained(model_dict["m2"]) #, local_files_only = True)
-tokenizer = AutoTokenizer.from_pretrained(model_dict["m2"]) #, local_files_only = True)
+model = AutoModelForCausalLM.from_pretrained(model_dict["m3"]) #, local_files_only = True)
+tokenizer = AutoTokenizer.from_pretrained(model_dict["m3"]) #, local_files_only = True)
 device = ("mps" if torch.backends.mps.is_available() else "cpu")
 model = model.to(device)
 
