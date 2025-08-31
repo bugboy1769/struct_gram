@@ -23,7 +23,7 @@ The current graph state looks something like this:
 
 I am too lazy to show the edge features in the visualization but the edges have relationality features as well.
 
-#Renewed Architectural Approach Towards GNN - LLM Interfacing
+# Renewed Architectural Approach Towards GNN - LLM Interfacing
 
 ## Key Changes:
 
