@@ -53,6 +53,8 @@ llm = None
 def generate_vllm(prompt):
     return llm.generate(prompt, sampling_params)
 
+# ======================================== Graph Creation Methods =======================================
+
 def table_to_graph(df):
 
     G = nx.Graph()
@@ -85,17 +87,15 @@ def table_to_graph(df):
 def get_col_stats(df, col):
 
     series = df[col]
-    stats = {f"column_name {col}":             
-             {
-                "column_name": f" {col}",
-                "column_data_type": f" {str(series.dtype)}",
-                "unique_count": f" {len(series.unique())}",
-                "null_count:": f" {series.isnull().sum()}"
-            }
+    stats = {
+        "column_name": f" {col}",
+        "column_data_type": f" {str(series.dtype)}",
+        "unique_count": f" {len(series.unique())}",
+        "null_count:": f" {series.isnull().sum()}"
     }
     #Numeric DataType Stats: However, there are multiple types of numeric data, not every numeric data has statistical meaning, for example customer_id. however, here, we do it anyway, ideally, we need to bifurcate numerical columns further.
     if pd.api.types.is_numeric_dtype(series):
-        stats.get(f"column_name {col}").update(
+        stats.update(
             {
                 "mean": f" {series.mean()}",
                 "standard_deviation": f" {series.std()}",
@@ -108,7 +108,7 @@ def get_col_stats(df, col):
         #ideally we want llm calls within here to create proper classification of string type columns, but sigh, we proceed anyway
         digit_pattern = r'\d'
         special_char_pattern = r'[^a-zA-Z0-9\s]'
-        stats.get(f"column_name {col}").update(
+        stats.update(
             {
                 "avg_length_elements": f" {series.str.len().mean()}",
                 "max_length_elements": f" {series.str.len().max()}",
@@ -157,12 +157,14 @@ def get_graph_summary(G: nx.Graph) -> dict[str, any]:
             'num_components': nx.number_connected_components(G)
         }
 
+# ======================================== LLM =======================================
+
+
 def feature_tokenizer(stat_dict):
-    column_information=[f"{k}: {v}" for k, v in stat_dict.get(f"column_name {stat_dict.keys()[0]}").items()]
-    #column_information = "|| Is a Column Node Connected To ||".join([f"{k}: {v}" for k, v in stat_dict.items()])
-    print(separator_string + f"all text:{column_information}" + separator_string)
+    all_text = "|| Is a Column Node Connected To ||".join([f"{k}: {v}" for k, v in stat_dict.items()])
+    print(separator_string + f"all text:{all_text}" + separator_string)
     tokens = tokenizer(
-        column_information,
+        all_text,
         padding = True,
         return_tensors = 'pt'
     )
@@ -172,6 +174,8 @@ def feature_tokenizer(stat_dict):
         embeddings = model.get_input_embeddings()(tokens['input_ids'])
         #pooled = embeddings.mean(dim = 1).squeeze(0)
     return embeddings
+
+# ======================================== Torch Geometric =======================================
 
 def nx_to_pyg(graph, node_features):
 
@@ -215,18 +219,11 @@ def nx_to_pyg(graph, node_features):
 
 if __name__ == '__main__':
     # Initialize vLLM here to avoid multiprocessing issues
-    # First, move the main model to CPU to free GPU memory
-    model = model.to('cpu')
-    torch.cuda.empty_cache()
-
     llm = LLM(
-        model="HuggingFaceTB/SmolLM-135M",  # Much smaller model
-        gpu_memory_utilization=0.6,
+        model="meta-llama/Llama-3.2-3B",
+        gpu_memory_utilization=0.8,
         disable_log_stats=True
     )
-
-    # Move model back to GPU after vLLM initialization
-    model = model.to(device)
 
     graph, feature_tensor, test_node = table_to_graph(truncated_df)
     pyg, node_idx = nx_to_pyg(graph, feature_tensor)
