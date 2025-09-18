@@ -12,7 +12,7 @@ from projection_layer import LLMProjector
 import time
 
 
-path = "customer.csv"
+path = "Project.csv"
 df = pd.read_csv(path)
 truncated_df = df [:15]
 # print(f"Original DataFrame: {truncated_df}")
@@ -31,11 +31,13 @@ model_dict = {
 }
 
 
-model = AutoModelForCausalLM.from_pretrained(model_dict["m5"]) #, local_files_only = True)
-tokenizer = AutoTokenizer.from_pretrained(model_dict["m5"]) #, local_files_only = True)
+model = AutoModelForCausalLM.from_pretrained(model_dict["m1"]) #, local_files_only = True)
+tokenizer = AutoTokenizer.from_pretrained(model_dict["m1"]) #, local_files_only = True)
 tokenizer.pad_token = tokenizer.eos_token
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = model.to(device)
+
+separator_string = "\n ===================================================================================== \n"
 
 def table_to_graph(df):
 
@@ -46,7 +48,7 @@ def table_to_graph(df):
         col_stats = get_col_stats(df, col)
         G.add_node(f"col_{col}", node_type = "column", **col_stats)
         tensor_features = feature_tokenizer(col_stats)
-        print(f"Tensor Features Shape: {tensor_features.shape}")
+        print(separator_string + f"Tensor Features Shape: {tensor_features.shape}" + separator_string)
         node_features.append(tensor_features) #a list of tensors of shape [1, seq_len, embedding_dim]
         max_length = max(max_length, tensor_features.shape[1])
     
@@ -54,7 +56,7 @@ def table_to_graph(df):
     for features in node_features:
         current_length = features.shape[1]
         if current_length < max_length:
-            padding = torch.zeros(1, max_length - current_length, 3072, device=device).to(device)
+            padding = torch.zeros(1, max_length - current_length, 768, device=device).to(device)
             padded = torch.cat([features, padding], dim = 1)
         else:
             padded = features
@@ -141,7 +143,7 @@ def get_graph_summary(G: nx.Graph) -> dict[str, any]:
 
 def feature_tokenizer(stat_dict):
     all_text = "|| Is a Column Node Connected To ||".join([f"{k}: {v}" for k, v in stat_dict.items()])
-    print(f"all text:{all_text}")
+    print(separator_string + f"all text:{all_text}" + separator_string)
     tokens = tokenizer(
         all_text,
         padding = True,
@@ -196,10 +198,10 @@ def nx_to_pyg(graph, node_features):
 
 graph, feature_tensor, test_node = table_to_graph(truncated_df)
 pyg, node_idx = nx_to_pyg(graph, feature_tensor)
-print(f"Pytorch Geometric Graph: {pyg}")
-print(f"Node Index Mapping: {node_idx}")
+print(separator_string + f"Pytorch Geometric Graph: {pyg}" + separator_string)
+print(separator_string + f"Node Index Mapping: {node_idx}" + separator_string)
 #print(get_graph_summary(graph))
-print(f"Feature Tensor: {feature_tensor.shape}")
+print(separator_string + f"Feature Tensor: {feature_tensor.shape}" + separator_string)
 
 # pos = nx.circular_layout(graph)  # or spring_layout, shell_layout, etc.
 # nx.draw(graph, pos, with_labels=True, node_color='lightblue', 
@@ -220,8 +222,8 @@ pyg.edge_index = pyg.edge_index.to(device)
 with torch.no_grad():
     graph_embedding, node_embeddings = gcn_model(pyg.x, pyg.edge_index)
 
-print(f"Graph Embedding Shape: {graph_embedding.shape}")
-print(f"Node Embeddings Shape: {node_embeddings.shape}")
+print(separator_string+f"Graph Embedding Shape: {graph_embedding.shape}"+separator_string)
+print(separator_string+f"Node Embeddings Shape: {node_embeddings.shape}"+separator_string)
 
 #initialise and run projection layer
 projector = LLMProjector(gcn_dim=embeddimg_dim, llm_dim=embeddimg_dim)
@@ -235,19 +237,19 @@ for node in node_embeddings:
         table_contexts.append(projection)
 table_context = torch.cat(table_contexts, dim = 0)
 
-print(f"Table Context Shape: {table_context.shape}")
+print(separator_string+f"Table Context Shape: {table_context.shape}"+separator_string)
 
 #appending table context to tokenised query
 
 query = "You are being presented an aggregated sentence which represents the aggregation of a csv table, which was converted to a graph where the nodes are the columns. Your job is to look at these text node features and give me a total summary of the table: "
 query_tokens = tokenizer(query, padding = True, return_tensors = 'pt').to(device)
 query_embeds = model.get_input_embeddings()(query_tokens['input_ids']).to(device)
-print(f"QE Shape {query_embeds.shape}")
+print(separator_string+f"QE Shape {query_embeds.shape}"+separator_string)
 #print(f"Query Embeds: {query_embeds}")
 
 def generate_tokens(inputs):
     with torch.no_grad():
-        outputs = model(inputs_embeds = inputs.to(device), use_cache = False) # Because feedforward, we don't need pytorch to update or store grads
+        outputs = model(inputs_embeds = inputs, use_cache = False) # Because feedforward, we don't need pytorch to update or store grads
         logits = outputs.logits #Storing all the logits that the model produces
         #past_kv = outputs.past_key_values
         last_logits = logits[0, -1, :] #Pick out the final logit as we are doing autoregressive generation
@@ -269,11 +271,11 @@ def generate_output(feature_tensor):
 
     return generated_tokens, tokenizer.decode(generated_tokens)
 
-print(f"Test Node Shape: {test_node[0].shape}")
+print(separator_string+f"Test Node Shape: {test_node[0].shape}"+separator_string)
 combined_embeds = torch.concat([query_embeds, test_node[0]], dim = 1).squeeze(0).to(device)
-print(f"Combined Embeds: {combined_embeds.shape}")
+print(separator_string+f"Combined Embeds: {combined_embeds.shape}"+separator_string)
 
-print(f"ft0Shape: {feature_tensor.squeeze(0).shape}")
+print(separator_string+f"ft0Shape: {feature_tensor.squeeze(0).shape}"+separator_string)
 
 def feature_concat (feature_tensor):
     num_nodes, seq_len, embeddimg_dim = feature_tensor.shape
@@ -281,6 +283,6 @@ def feature_concat (feature_tensor):
 
     return concat_features
 concat_features = feature_concat (feature_tensor)
-print(f"concat_features: {concat_features.shape}")
+print(separator_string+f"concat_features: {concat_features.shape}"+separator_string)
 generated_tokens, generated_words = generate_output(concat_features) #input dim = [seq_len, embedding_dim]
-print(f"Gen Word: {generated_words}")
+print(separator_string+f"Gen Word: {generated_words}"+separator_string)
