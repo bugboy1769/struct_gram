@@ -212,11 +212,18 @@ def nx_to_pyg(graph, node_features):
 
 if __name__ == '__main__':
     # Initialize vLLM here to avoid multiprocessing issues
+    # First, move the main model to CPU to free GPU memory
+    model = model.to('cpu')
+    torch.cuda.empty_cache()
+
     llm = LLM(
-        model="meta-llama/Llama-3.2-3B",
-        gpu_memory_utilization=0.8,
+        model="HuggingFaceTB/SmolLM-135M",  # Much smaller model
+        gpu_memory_utilization=0.6,
         disable_log_stats=True
     )
+
+    # Move model back to GPU after vLLM initialization
+    model = model.to(device)
 
     graph, feature_tensor, test_node = table_to_graph(truncated_df)
     pyg, node_idx = nx_to_pyg(graph, feature_tensor)
