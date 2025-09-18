@@ -47,10 +47,8 @@ sampling_params=SamplingParams(
     max_tokens=100,
 )
 
-llm=LLM(
-    model="meta-llama/Llama-3.2-3B",
-    gpu_memory_utilization=0.8,
-)
+# Move LLM initialization inside main block to avoid multiprocessing issues
+llm = None
 
 def generate_vllm(prompt):
     return llm.generate(prompt, sampling_params)
@@ -212,94 +210,102 @@ def nx_to_pyg(graph, node_features):
     return data, node_to_idx
 
 
-graph, feature_tensor, test_node = table_to_graph(truncated_df)
-pyg, node_idx = nx_to_pyg(graph, feature_tensor)
-print(separator_string + f"PYG: {pyg}" + separator_string)
-print(separator_string + f"NODE IDX: {node_idx}" + separator_string)
-#print(get_graph_summary(graph))
-print(separator_string + f"Feature Tensor Shape: {feature_tensor.shape}" + separator_string)
+if __name__ == '__main__':
+    # Initialize vLLM here to avoid multiprocessing issues
+    llm = LLM(
+        model="meta-llama/Llama-3.2-3B",
+        gpu_memory_utilization=0.8,
+        disable_log_stats=True
+    )
 
-# pos = nx.circular_layout(graph)  # or spring_layout, shell_layout, etc.
-# nx.draw(graph, pos, with_labels=True, node_color='lightblue', 
-#         node_size=2000, font_size=8, font_weight='bold', 
-#         edge_color='gray', width=2)
-# plt.show()
+    graph, feature_tensor, test_node = table_to_graph(truncated_df)
+    pyg, node_idx = nx_to_pyg(graph, feature_tensor)
+    print(separator_string + f"PYG: {pyg}" + separator_string)
+    print(separator_string + f"NODE IDX: {node_idx}" + separator_string)
+    #print(get_graph_summary(graph))
+    print(separator_string + f"Feature Tensor Shape: {feature_tensor.shape}" + separator_string)
+
+    # pos = nx.circular_layout(graph)  # or spring_layout, shell_layout, etc.
+    # nx.draw(graph, pos, with_labels=True, node_color='lightblue',
+    #         node_size=2000, font_size=8, font_weight='bold',
+    #         edge_color='gray', width=2)
+    # plt.show()
 
 
-#initialise and run GCN
-embeddimg_dim = model.get_input_embeddings().embedding_dim
-gcn_model = TableGCN(input_dim=embeddimg_dim, hidden_dim=embeddimg_dim, output_dim=embeddimg_dim)
-gcn_model = gcn_model.to(device)
-gcn_model.eval()
+    #initialise and run GCN
+    embeddimg_dim = model.get_input_embeddings().embedding_dim
+    gcn_model = TableGCN(input_dim=embeddimg_dim, hidden_dim=embeddimg_dim, output_dim=embeddimg_dim)
+    gcn_model = gcn_model.to(device)
+    gcn_model.eval()
 
-pyg.x = pyg.x.to(device)
-pyg.edge_index = pyg.edge_index.to(device)
+    pyg.x = pyg.x.to(device)
+    pyg.edge_index = pyg.edge_index.to(device)
 
-with torch.no_grad():
-    graph_embedding, node_embeddings = gcn_model(pyg.x, pyg.edge_index)
-
-print(separator_string+f" {graph_embedding.shape}"+separator_string)
-print(separator_string+f" {node_embeddings.shape}"+separator_string)
-
-#initialise and run projection layer
-projector = LLMProjector(gcn_dim=embeddimg_dim, llm_dim=embeddimg_dim)
-projector = projector.to(device)
-projector.eval()
-
-table_contexts = []
-for node in node_embeddings:
     with torch.no_grad():
-        projection = projector(node.unsqueeze(0))
-        table_contexts.append(projection)
-table_context = torch.cat(table_contexts, dim = 0)
+        graph_embedding, node_embeddings = gcn_model(pyg.x, pyg.edge_index)
 
-print(separator_string+f" {table_context.shape}"+separator_string)
+    print(separator_string+f" {graph_embedding.shape}"+separator_string)
+    print(separator_string+f" {node_embeddings.shape}"+separator_string)
 
-#appending table context to tokenised query
+    #initialise and run projection layer
+    projector = LLMProjector(gcn_dim=embeddimg_dim, llm_dim=embeddimg_dim)
+    projector = projector.to(device)
+    projector.eval()
 
-query = "You are being presented an aggregated sentence which represents the aggregation of a csv table, which was converted to a graph where the nodes are the columns. Your job is to look at these text node features and give me a total summary of the table: "
-query_tokens = tokenizer(query, padding = True, return_tensors = 'pt').to(device)
-query_embeds = model.get_input_embeddings()(query_tokens['input_ids']).to(device)
-print(separator_string+f"QE Shape {query_embeds.shape}"+separator_string)
-#print(f"Query Embeds: {query_embeds}")
+    table_contexts = []
+    for node in node_embeddings:
+        with torch.no_grad():
+            projection = projector(node.unsqueeze(0))
+            table_contexts.append(projection)
+    table_context = torch.cat(table_contexts, dim = 0)
 
-def generate_tokens(inputs):
-    with torch.no_grad():
-        outputs = model(inputs_embeds = inputs, use_cache = False) # Because feedforward, we don't need pytorch to update or store grads
-        logits = outputs.logits #Storing all the logits that the model produces
-        #past_kv = outputs.past_key_values
-        last_logits = logits[0, -1, :] #Pick out the final logit as we are doing autoregressive generation
-        next_token_id = last_logits.argmax() #Applying argmax to sample out the most likely token_id
+    print(separator_string+f" {table_context.shape}"+separator_string)
 
-    return next_token_id
+    #appending table context to tokenised query
 
-def generate_output(feature_tensor): 
-    generated_tokens = []
-    duration_s = []
-    past_kv = None
-    current_embeds = feature_tensor.unsqueeze(0)
-    for _ in range(100):
-        next_token_id = generate_tokens(current_embeds) # Generate next_token_id
-        generated_tokens.append(next_token_id.item())
-        next_embed = model.get_input_embeddings()(next_token_id.unsqueeze(0))
-        next_embed = next_embed.unsqueeze(0)
-        current_embeds = torch.cat([current_embeds, next_embed], dim = 1)
+    query = "You are being presented an aggregated sentence which represents the aggregation of a csv table, which was converted to a graph where the nodes are the columns. Your job is to look at these text node features and give me a total summary of the table: "
+    query_tokens = tokenizer(query, padding = True, return_tensors = 'pt').to(device)
+    query_embeds = model.get_input_embeddings()(query_tokens['input_ids']).to(device)
+    print(separator_string+f"QE Shape {query_embeds.shape}"+separator_string)
+    #print(f"Query Embeds: {query_embeds}")
 
-    return generated_tokens, tokenizer.decode(generated_tokens)
+    def generate_tokens(inputs):
+        with torch.no_grad():
+            outputs = model(inputs_embeds = inputs, use_cache = False) # Because feedforward, we don't need pytorch to update or store grads
+            logits = outputs.logits #Storing all the logits that the model produces
+            #past_kv = outputs.past_key_values
+            last_logits = logits[0, -1, :] #Pick out the final logit as we are doing autoregressive generation
+            next_token_id = last_logits.argmax() #Applying argmax to sample out the most likely token_id
 
-print(separator_string+f" {test_node[0].shape}"+separator_string)
-combined_embeds = torch.concat([query_embeds, test_node[0]], dim = 1).squeeze(0).to(device)
-print(separator_string+f" {combined_embeds.shape}"+separator_string)
+        return next_token_id
 
-print(separator_string+f" {feature_tensor.squeeze(0).shape}"+separator_string)
+    def generate_output(feature_tensor):
+        generated_tokens = []
+        duration_s = []
+        past_kv = None
+        current_embeds = feature_tensor.unsqueeze(0)
+        for _ in range(100):
+            next_token_id = generate_tokens(current_embeds) # Generate next_token_id
+            generated_tokens.append(next_token_id.item())
+            next_embed = model.get_input_embeddings()(next_token_id.unsqueeze(0))
+            next_embed = next_embed.unsqueeze(0)
+            current_embeds = torch.cat([current_embeds, next_embed], dim = 1)
 
-def feature_concat (feature_tensor):
-    num_nodes, seq_len, embeddimg_dim = feature_tensor.shape
-    concat_features = feature_tensor.reshape(-1, embeddimg_dim)
+        return generated_tokens, tokenizer.decode(generated_tokens)
 
-    return concat_features
+    print(separator_string+f" {test_node[0].shape}"+separator_string)
+    combined_embeds = torch.concat([query_embeds, test_node[0]], dim = 1).squeeze(0).to(device)
+    print(separator_string+f" {combined_embeds.shape}"+separator_string)
 
-concat_features = feature_concat (feature_tensor)
-print(separator_string+f"concat_features: {concat_features.shape}"+separator_string)
-generated_tokens, generated_words = generate_output(concat_features) #input dim = [seq_len, embedding_dim]
-print(separator_string+f"Gen Word: {generated_words}"+separator_string)
+    print(separator_string+f" {feature_tensor.squeeze(0).shape}"+separator_string)
+
+    def feature_concat (feature_tensor):
+        num_nodes, seq_len, embeddimg_dim = feature_tensor.shape
+        concat_features = feature_tensor.reshape(-1, embeddimg_dim)
+
+        return concat_features
+
+    concat_features = feature_concat (feature_tensor)
+    print(separator_string+f"concat_features: {concat_features.shape}"+separator_string)
+    generated_tokens, generated_words = generate_output(concat_features) #input dim = [seq_len, embedding_dim]
+    print(separator_string+f"Gen Word: {generated_words}"+separator_string)
