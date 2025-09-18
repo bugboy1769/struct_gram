@@ -87,15 +87,15 @@ def table_to_graph(df):
 def get_col_stats(df, col):
 
     series = df[col]
-    stats = {
+    stats = {"column_name" f" {col}":{
         "column_name": f" {col}",
         "column_data_type": f" {str(series.dtype)}",
         "unique_count": f" {len(series.unique())}",
         "null_count:": f" {series.isnull().sum()}"
-    }
+    }}
     #Numeric DataType Stats: However, there are multiple types of numeric data, not every numeric data has statistical meaning, for example customer_id. however, here, we do it anyway, ideally, we need to bifurcate numerical columns further.
     if pd.api.types.is_numeric_dtype(series):
-        stats.update(
+        stats.get("column_name" f" {col}").update(
             {
                 "mean": f" {series.mean()}",
                 "standard_deviation": f" {series.std()}",
@@ -108,7 +108,7 @@ def get_col_stats(df, col):
         #ideally we want llm calls within here to create proper classification of string type columns, but sigh, we proceed anyway
         digit_pattern = r'\d'
         special_char_pattern = r'[^a-zA-Z0-9\s]'
-        stats.update(
+        stats.get("column_name" f" {col}").update(
             {
                 "avg_length_elements": f" {series.str.len().mean()}",
                 "max_length_elements": f" {series.str.len().max()}",
@@ -118,6 +118,7 @@ def get_col_stats(df, col):
         )
     #stats = feature_tokenizer(stats)
     #print(f"Tokenized Stats: {stats}")
+    print(stats)
     return stats
 
 def create_and_connect_edges(graph: nx.Graph, df):
@@ -161,10 +162,11 @@ def get_graph_summary(G: nx.Graph) -> dict[str, any]:
 
 
 def feature_tokenizer(stat_dict):
-    all_text = "|| Is a Column Node Connected To ||".join([f"{k}: {v}" for k, v in stat_dict.items()])
-    print(separator_string + f"all text:{all_text}" + separator_string)
+    column_information=[f"{k}: {v}" for k, v in list(stat_dict.keys().items())[0]]
+    #all_text = "|| Is a Column Node Connected To ||".join([f"{k}: {v}" for k, v in stat_dict.items()])
+    print(separator_string + f"all text:{column_information}" + separator_string)
     tokens = tokenizer(
-        all_text,
+        column_information,
         padding = True,
         return_tensors = 'pt'
     )
