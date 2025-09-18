@@ -12,6 +12,8 @@ from projection_layer import LLMProjector
 import time
 from vllm import LLM, SamplingParams
 
+## python -c "import torch; torch.cuda.empty_cache(); print('GPU cache cleared')"
+
 
 path = "Project.csv"
 df = pd.read_csv(path)
