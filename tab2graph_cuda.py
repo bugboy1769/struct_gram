@@ -164,7 +164,7 @@ def get_graph_summary(G: nx.Graph) -> dict[str, any]:
 
 
 def feature_tokenizer(stat_dict):
-    column_information=[f"{k}: {v}" for k, v in list(stat_dict.keys().items())[0]]
+    column_information=[f"{k}: {v}" for k, v in list(stat_dict.values())[0].items()]
     #all_text = "|| Is a Column Node Connected To ||".join([f"{k}: {v}" for k, v in stat_dict.items()])
     print(separator_string + f"all text:{column_information}" + separator_string)
     tokens = tokenizer(
