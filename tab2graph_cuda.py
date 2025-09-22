@@ -74,10 +74,11 @@ def table_to_graph(df):
         max_length = max(max_length, tensor_features.shape[1])
     
     padded_features = []
+    embedding_dim = model.get_input_embeddings().embedding_dim
     for features in node_features:
         current_length = features.shape[1]
         if current_length < max_length:
-            padding = torch.zeros(1, max_length - current_length, 768, device=device).to(device)
+            padding = torch.zeros(1, max_length - current_length, embedding_dim, device=device)
             padded = torch.cat([features, padding], dim = 1)
         else:
             padded = features
@@ -166,7 +167,7 @@ def get_graph_summary(G: nx.Graph) -> dict[str, any]:
 
 
 def feature_tokenizer(stat_dict):
-    column_information=[f"{k}: {v}" for k, v in list(stat_dict.values())[0].items()]
+    column_information = " || ".join([f"{k}: {v}" for k, v in list(stat_dict.values())[0].items()])
     #all_text = "|| Is a Column Node Connected To ||".join([f"{k}: {v}" for k, v in stat_dict.items()])
     print(separator_string + f"all text:{column_information}" + separator_string)
     tokens = tokenizer(
