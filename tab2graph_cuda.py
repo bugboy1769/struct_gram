@@ -23,7 +23,10 @@ PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
 
 print(f"CUDA available: {torch.cuda.is_available()}")
 print(f"CUDA device count: {torch.cuda.device_count()}")
-print(f"Current device: {torch.cuda.current_device()}")
+if torch.cuda.is_available():
+    print(f"Current device: {torch.cuda.current_device()}")
+else:
+    print("Current device: CPU (CUDA not available)")
 
 model_dict = {
     "m1": "gpt2",
