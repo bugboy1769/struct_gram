@@ -92,15 +92,15 @@ def table_to_graph(df):
 def get_col_stats(df, col):
 
     series = df[col]
-    stats = {"column_name" f" {col}":{
+    stats = {f"column_name {col}":{
         "column_name": f" {col}",
         "column_data_type": f" {str(series.dtype)}",
         "unique_count": f" {len(series.unique())}",
-        "null_count:": f" {series.isnull().sum()}"
+        "null_count": f" {series.isnull().sum()}"
     }}
     #Numeric DataType Stats: However, there are multiple types of numeric data, not every numeric data has statistical meaning, for example customer_id. however, here, we do it anyway, ideally, we need to bifurcate numerical columns further.
     if pd.api.types.is_numeric_dtype(series):
-        stats.get("column_name" f" {col}").update(
+        stats[f"column_name {col}"].update(
             {
                 "mean": f" {series.mean()}",
                 "standard_deviation": f" {series.std()}",
@@ -113,7 +113,7 @@ def get_col_stats(df, col):
         #ideally we want llm calls within here to create proper classification of string type columns, but sigh, we proceed anyway
         digit_pattern = r'\d'
         special_char_pattern = r'[^a-zA-Z0-9\s]'
-        stats.get("column_name" f" {col}").update(
+        stats[f"column_name {col}"].update(
             {
                 "avg_length_elements": f" {series.str.len().mean()}",
                 "max_length_elements": f" {series.str.len().max()}",
