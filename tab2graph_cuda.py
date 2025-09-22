@@ -69,7 +69,7 @@ def table_to_graph(df):
         col_stats = get_col_stats(df, col)
         G.add_node(f"col_{col}", node_type = "column", **col_stats)
         tensor_features = feature_tokenizer(col_stats)
-        print(separator_string + f"Tensor Features Shape: {tensor_features.shape}" + separator_string)
+        #print(separator_string + f"Tensor Features Shape: {tensor_features.shape}" + separator_string)
         node_features.append(tensor_features) #a list of tensors of shape [1, seq_len, embedding_dim]
         max_length = max(max_length, tensor_features.shape[1])
     
