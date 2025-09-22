@@ -123,7 +123,6 @@ def get_col_stats(df, col):
         )
     #stats = feature_tokenizer(stats)
     #print(f"Tokenized Stats: {stats}")
-    print(stats)
     return stats
 
 def create_and_connect_edges(graph: nx.Graph, df):
