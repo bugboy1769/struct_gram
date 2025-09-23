@@ -12,6 +12,7 @@ from projection_layer import LLMProjector
 import time
 from langchain_ollama import OllamaLLM
 from vllm import LLM, SamplingParams
+from pathlib import Path
 
 PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
 
@@ -61,16 +62,41 @@ class vLLMModel():
             raise ValueError("LLM not loaded, call load_llm first.")
         return self.llm.generate(prompt, self.sampling_params)
 
-vllm_llm=vLLMModel()
-
-def load_data(filename):
-    path = str(filename)
-    return pd.read_csv(path)
+class DataProcessor:
+    def __init__(self):
+        self.config={}
+        self.supported_formats=[".csv", ".xlsx", ".json", "parquet"]
+        self.data_cache={}
+    
+    def load_data(self, filename, **kwargs):
+        file_ext=Path(filename).suffix.lower()
+        if filename in self.data_cache:
+            return self.data_cache[filename]
+        loaders={
+            '.csv':pd.read_csv,
+            'xlsx':pd.read_excel,
+            '.json':pd.read_json,
+            '.parquet':pd.read_parquet
+        }
+        if file_ext not in loaders:
+            raise ValueError(f"Invalid File Type: {file_ext}")
+        df=loaders[file_ext](filename, **kwargs)
+        self.data_cache[filename]=df
+        return df
+    
 
 
 def generate_vllm(prompt):
     return llm.generate(prompt, vllm_llm.sampling_params)
 
+
+def table_to_nx_graph(df):
+    G=nx.Graph
+    node_features=[]
+    max_len=0
+    for col in df.columns:
+        col_stats=get_col_stats(df, col)
+        G.add_node(f"col_{col}", node_type="column", col_stats)
 
 
 
