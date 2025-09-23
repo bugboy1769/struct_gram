@@ -65,7 +65,7 @@ class vLLMModel():
 class DataProcessor:
     def __init__(self):
         self.config={}
-        self.supported_formats=[".csv", ".xlsx", ".json", "parquet"]
+        self.supported_formats=[".csv", ".xlsx", ".json", ".parquet"]
         self.data_cache={}
     
     def load_data(self, filename, **kwargs):
@@ -74,7 +74,7 @@ class DataProcessor:
             return self.data_cache[filename]
         loaders={
             '.csv':pd.read_csv,
-            'xlsx':pd.read_excel,
+            '.xlsx':pd.read_excel,
             '.json':pd.read_json,
             '.parquet':pd.read_parquet
         }
@@ -104,13 +104,13 @@ class DataProcessor:
 
     def truncate_data(self, df, max_rows=None, strategy='head'):
         if max_rows is None:
-            self.config.get('max_rows', 15)
+            max_rows=self.config.get('max_rows', 15)
         if len(df)<=max_rows:
             return df
         strategies={
             'head': lambda:df.head(max_rows),
             'tail': lambda:df.tail(max_rows),
-            'sample': lambda:df.sample(max_rows, random_seed=42)
+            'sample': lambda:df.sample(max_rows, random_state=42)
         }
         return strategies[strategy]()
 
