@@ -119,7 +119,7 @@ class DataProcessor:
             'shape':df.shape,
             'columns':list(df.columns),
             'dtypes':df.dtypes.to_dict(),
-            'null_counts':df.isnull().sum.to_dict(),
+            'null_counts':df.isnull().sum().to_dict(),
             'numeric_columns':df.select_dtypes(include=[np.number]).columns.tolist(),
             'categorical_columns':df.select_dtypes(include=['object']).columns.tolist(),
             'memory_usage_mb': df.memory_usage(deep=True).sum()/1024**2
@@ -155,6 +155,39 @@ class DataProcessor:
                 else:
                     column_types[col]='text'
         return column_types
+
+class ColumnStatsExtractor:
+    def __init__(self):
+        self.digit_pattern=r'\d'
+        self.special_char_pattern=r'[^a-zA-Z0-9\s]'
+    def get_col_stats(self, df, col):
+        series = df[col]
+        stats = {f"column_name {col}":{
+            "column_name": f" {col}",
+            "column_data_type": f" {str(series.dtype)}",
+            "unique_count": f" {len(series.unique())}",
+            "null_count": f" {series.isnull().sum()}"
+        }}
+        if pd.api.types.is_numeric_dtype(series):
+            stats[f"column_name {col}"].update(self.extract_numeric_stats(series))
+        if pd.api.types.is_string_dtype(series):
+            stats[f"column_name {col}"].update(self.extract_string_stats(series))
+        return stats
+    def extract_numeric_stats(series):
+        return {
+                "mean": f" {series.mean()}",
+                "standard_deviation": f" {series.std()}",
+                "median": f" {series.median()}",
+                "min": f" {series.min()}",
+                "max": f" {series.max()}"
+            }
+    def extract_string_stats(series):
+        return {
+                "avg_length_elements": f" {series.str.len().mean()}",
+                "max_length_elements": f" {series.str.len().max()}",
+                "contains_numbers": f" {series.str.contains(self.digit_pattern).any()}",
+                "contains_spl_chars": f" {series.str.contains(self.special_char_pattern).any()}"
+            }
 
 
 def generate_vllm(prompt):
