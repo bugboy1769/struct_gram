@@ -141,7 +141,21 @@ class DataProcessor:
         else:
             return df
 
-    def 
+    def detect_column_types(self, df):
+        column_types={}
+        for col in df.columns:
+            if pd.api.types.is_numeric_dtype(df[col]):
+                if df[col].nunique()<10:
+                    column_types[col]='categorical_numeric'
+                else:
+                    column_types[col]='continuous_nmeric'
+            elif pd.api.types.is_object_dtype(df[col]):
+                if df[col].str.match(r'\d{4}-\d{2}-\d{2}').any():
+                    column_types[col]='date_string'
+                else:
+                    column_types[col]='text'
+        return column_types
+
 
 def generate_vllm(prompt):
     return llm.generate(prompt, vllm_llm.sampling_params)
