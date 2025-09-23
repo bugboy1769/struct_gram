@@ -84,6 +84,35 @@ class DataProcessor:
         self.data_cache[filename]=df
         return df
     
+    def validate_data(self, df):
+        report={
+            'errors':[],
+            'warnings':[],
+            "info": {
+                'shape': df.shape,
+                'memory_usage': df.memory_usage(deep=True).sum(),
+                'dtypes': df.dtypes.to_dict()
+            }
+        }
+        if df.empty:
+            report["errors"].append("DataFrame is Empty.")
+        if len(df.columns) < 2:
+            report["errors"].append("DataFrame has only 1 column, relationality cannot be established.")
+        if df.memory_usage(deep=True).sum()>1e9:
+            report["warnings"].append("DataFrame size is exceeding 1GiB, may cause memory issues.")
+        return report
+
+    def truncate_data(self, df, max_rows=None, strategy='head'):
+        if max_rows is None:
+            self.config.get('max_rows', 15)
+        if len(df)<=max_rows:
+            return df
+        strategies={
+            'head': lambda:df.head(max_rows),
+            'tail': lambda:df.tail(max_rows),
+            'sample': lambda:df.sample(max_rows, random_seed=42)
+        }
+        return strategies[strategy]()
 
 
 def generate_vllm(prompt):
