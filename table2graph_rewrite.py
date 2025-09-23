@@ -40,24 +40,26 @@ class HFModel():
         self.device=torch.device("cuda")
         self.model=self.model.to(self.device)
 
-class vLLMModel(LLM, SamplingParams):
+class vLLMModel():
     def __init__(self):
         self.llm=None
         self.sampling_params=SamplingParams(
             temperature=0.2,
             top_p=0.7,
             top_k=50,
-            max_tokens=100
-        )
+            max_tokens=50
+            )
 
-    def load_llm():
+    def load_llm(self):
         self.llm=LLM(
             model="meta-llama/Llama-3.2-3B",
             gpu_memory_utilization=0.8,
-        )
+           )
     
-    def generate_response(prompt):
-        return llm.generate(prompt, sampling_params)
+    def generate_response(self, prompt):
+        if self.llm==None:
+            raise ValueError("LLM not loaded, call load_llm first.")
+        return self.llm.generate(prompt, self.sampling_params)
 
 vllm_llm=vLLMModel()
 
