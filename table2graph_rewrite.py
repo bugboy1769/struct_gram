@@ -114,13 +114,32 @@ class DataProcessor:
         }
         return strategies[strategy]()
 
+    def get_data_summary(self, df):
+        return {
+            'shape':df.shape,
+            'columns':list(df.columns),
+            'dtypes':df.dtypes.to_dict(),
+            'null_counts':df.isnull().sum.to_dict(),
+            'numeric_columns':df.select_dtypes(include=[np.number]).columns.tolist(),
+            'categorical_columns':df.select_dtypes(include=['object']).columns.tolist(),
+            'memory_usage_mb': df.memory_usage(deep=True).sum()/1024**2
+        }
+
+    def clean_columns(self, df): #Think about impact on training, should we include messy column names?
+        df_clean=df.copy()
+        df_clean.columns=df_clean.columns.str.strip()
+        df_clean.columns=df_clean.columns.str.replace(' ', '_')
+        return df_clean
+
+    def 
+
 
 def generate_vllm(prompt):
     return llm.generate(prompt, vllm_llm.sampling_params)
 
 
 def table_to_nx_graph(df):
-    G=nx.Graph
+    G=nx.Graph()
     node_features=[]
     max_len=0
     for col in df.columns:
