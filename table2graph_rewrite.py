@@ -173,22 +173,26 @@ class ColumnStatsExtractor:
         if pd.api.types.is_string_dtype(series):
             stats[f"column_name {col}"].update(self.extract_string_stats(series))
         return stats
-    def extract_numeric_stats(series):
+    def extract_numeric_stats(self, series):
         return {
                 "mean": f" {series.mean()}",
                 "standard_deviation": f" {series.std()}",
-                "median": f" {series.median()}",
-                "min": f" {series.min()}",
-                "max": f" {series.max()}"
             }
-    def extract_string_stats(series):
+    def extract_string_stats(self, series):
         return {
-                "avg_length_elements": f" {series.str.len().mean()}",
-                "max_length_elements": f" {series.str.len().max()}",
-                "contains_numbers": f" {series.str.contains(self.digit_pattern).any()}",
-                "contains_spl_chars": f" {series.str.contains(self.special_char_pattern).any()}"
+                "avg_length_elements": f" {series.str.len().mean()}",                "contains_numbers": f" {series.str.contains(self.digit_pattern).any()}",
             }
+    #ToDo: Add datetime and categorical stat extractors
+    def get_batch_stats(self, df, columns=None):
+        if columns is None:
+            columns=df.columns.to_list()
+        batch_stats={}
+        for col in columns:
+            batch_stats[col]=self.get_col_stats(df, col)
+        return batch_stats
 
+class RelationshipGenerator:
+    
 
 def generate_vllm(prompt):
     return llm.generate(prompt, vllm_llm.sampling_params)
