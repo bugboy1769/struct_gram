@@ -192,7 +192,36 @@ class ColumnStatsExtractor:
         return batch_stats
 
 class RelationshipGenerator:
-    
+    def __init__(self, threshold_config=None):
+        self.thresholds=threshold_config or {
+            'composite_threshold':0.4,
+            'weights': {
+                'name_similarity':0.2,
+                'value_similarity':0.3,
+                'jaccard_overlap':0.2,
+                'cardinality_similarity':0.15,
+                'dtype_similarity':0.15
+            }
+        }
+        self.sample_size=100 #For Jaccard~1000
+    def compute_all_relationship_scores(self, df, stats_dict=None):
+        relationships=[]
+        columns=df.columns.to_list()
+        for i, col1 in enumerate(columns):
+            for col2 in columns[i+1]:
+                edge_features=self.compute_edge_features(df, col1, col2)
+            composite_score=self.compute_composite_score(edge_features)
+            if composite_score<=self.thresholds[composite_score]:
+                relationships.append({
+                    'col1':col1,
+                    'col2':col2,
+                    'egde_features':edge_features,
+                    'composite_score':composite_score
+                })
+        return relationships
+
+        
+
 
 def generate_vllm(prompt):
     return llm.generate(prompt, vllm_llm.sampling_params)
