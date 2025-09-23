@@ -125,14 +125,23 @@ class DataProcessor:
             'memory_usage_mb': df.memory_usage(deep=True).sum()/1024**2
         }
 
-    def clean_columns(self, df): #Think about impact on training, should we include messy column names?
+    def preprocess_columns(self, df): #Think about impact on training, should we include messy column names?
         df_clean=df.copy()
         df_clean.columns=df_clean.columns.str.strip()
         df_clean.columns=df_clean.columns.str.replace(' ', '_')
         return df_clean
 
-    def 
+    def handle_missing_data(self, df, strategy='report'):
+        if strategy=='report':
+            return df.isnull().sum().to_dict()
+        if strategy=='drop':
+            return df.dropna()
+        if strategy=='fill':
+            return df.fillna(df.mean(numeric_only=True))
+        else:
+            return df
 
+    def 
 
 def generate_vllm(prompt):
     return llm.generate(prompt, vllm_llm.sampling_params)
