@@ -346,6 +346,14 @@ class FeatureTokenizer:
                 padded=features
             padded_features.append(padded.squeeze(0))
         return torch.stack(padded_features)
+    def batch_tokenize_columns(self, df, stats_extractor):
+        feature_list=[]
+        for col in df.coumns:
+            col_stats=stats_extractor.get_col_stats(df,col)
+            embeddings=self.tokenize_column_stats(col_stats)
+            feature_list.append(embeddings)
+        return self._pad_feature_list(feature_list)
+
 
 
     
