@@ -227,6 +227,7 @@ class RelationshipGenerator:
             'cardinality_similarity':self.cardinality_similarity(df[col1], df[col2]),
             'dtype_similarity':self.dtype_similarity(df[col1], df[col2])
         }
+    
     def cosine_similarity_names(self, col1, col2):
         from sklearn.feature_extraction.text import TfidfVectorizer
         from sklearn.metrics.pairwise import cosine_similarity
@@ -235,18 +236,68 @@ class RelationshipGenerator:
         vectorizer=TfidfVectorizer(analyzer='char', ngram_range=(2,3))
         tfidf_matrix=vectorizer.fit_transform([col1_tokens, col2_tokens])
         return cosine_similarity(tfidf_matrix[0:1],tfidf_matrix[1:2])[0][0]
+    
     def cosine_similarity_values(self, series1, series2):
         if pd.api.types.is_numeric_dtype(series1) and pd.api.types.is_numeric_dtype(series2):
+            #numerical
             v1=(series1-series1.mean())/series1.std() if series1.std()>0 else series1-series1.mean()
             v2=(series2-series2.mean())/series2.std() if series2.std()>0 else series2-series2.mean()
             min_len=min(len(v1), len(v2))
             v1,v2=v1[:min_len], v2[:min_len]
             dot_product=np.dot(v1,v2)
             norm1,norm2=np.linalg.norm(v1), np.linalg.norm(v2)
-            return dot_product/
-    
+            return dot_product/(norm1*norm2) if norm1>0 and norm2>0 else 0
+        else:
+            #categorical
+            all_values=set(series1.unique()) | set(series2.unique())
+            v1=[series1.value_counts().get(val,0) for val in all_values]
+            v2=[series2.value_counts().get(val,0) for val in all_values]
+            dot_product=np.dot(v1,v2)
+            norm1,norm2=np.linalg.norm(v1), np.linalg.norm(v2)
+            return dot_product/(norm1*norm2) if norm1>0 and norm2>0 else 0
         
+    def sampled_jaccard_similarity(self, series1, series2):
+        unique1=set(series1.dropna().unique())
+        unique2=set(series2.dropna().unique())
+        if len(unique1)>self.sample_size:
+            unique1=set(np.random.choice(list(unique1),self.sample_size,replace=False))
+        if len(unique2)>self.sample_size:
+            unique2=set(np.random.choice(list(unique2),self.sample_size,replace=False))
+        intersection=len(unique1&unique2)
+        union=len(unique1|unique2)
+        return intersection/union if union>0 else 0
+    
+    def cardinality_similarity(self, series1, series2):
+        card1,card2=series1.nunique(),series2.nunique()
+        max_card=max(card1,card2)
+        min_card=min(card1,card2)
+        return min_card/max_card if max_card>0 else 1
 
+    def dtype_similarity(self, series1, series2):
+        dtype_heirarchy={
+            'int64':'numeric',
+            'float64':'numeric',
+            'int32':'numeric',
+            'float32':'numeric',
+            'object':'categorical',
+            'string':'categorical',
+            'category':'categorical',
+            'datetime64[ns]':'temporal',
+            'bool':'boolean'
+        }
+        type1=dtype_heirarchy.get(str(series1.dtype), 'other')
+        type2=dtype_heirarchy.get(str(series2.dtype), 'other')
+        if type1==type2:
+            return 1.0
+        elif (type1=='numeric' and type2=='boolean') or (type1=='boolean' and type2=='numeric'):
+            return 0.7
+        else:
+            return 0.0
+    
+    def _compute_composite_score(self,edge_features):
+        weights=self.thresholds['weight']
+        return sum(edge_features[metric]*weights[metric] for metric in edge_features)
+    
 
 def generate_vllm(prompt):
     return llm.generate(prompt, vllm_llm.sampling_params)
