@@ -213,13 +213,38 @@ class RelationshipGenerator:
             composite_score=self.compute_composite_score(edge_features)
             if composite_score<=self.thresholds[composite_score]:
                 relationships.append({
-                    'col1':col1,
+                    'col1':col1, #why col1 and col2?
                     'col2':col2,
                     'egde_features':edge_features,
                     'composite_score':composite_score
                 })
         return relationships
-
+    def compute_edge_features(self, df, col1, col2):
+        return {
+            'name_similarity':self.cosine_similarity_names(col1, col2),
+            'value_similarity':self.cosine_similarity_values(df[col1], df[col2]),
+            'jaccard_overlap':self.sampled_jaccard_overlap(df[col1], df[col2]),
+            'cardinality_similarity':self.cardinality_similarity(df[col1], df[col2]),
+            'dtype_similarity':self.dtype_similarity(df[col1], df[col2])
+        }
+    def cosine_similarity_names(self, col1, col2):
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.metrics.pairwise import cosine_similarity
+        col1_tokens=' '.join(col1.lower().replace('_', ' ').split())
+        col2_tokens=' '.join(col2.lower().replace('_', ' ').split())
+        vectorizer=TfidfVectorizer(analyzer='char', ngram_range=(2,3))
+        tfidf_matrix=vectorizer.fit_transform([col1_tokens, col2_tokens])
+        return cosine_similarity(tfidf_matrix[0:1],tfidf_matrix[1:2])[0][0]
+    def cosine_similarity_values(self, series1, series2):
+        if pd.api.types.is_numeric_dtype(series1) and pd.api.types.is_numeric_dtype(series2):
+            v1=(series1-series1.mean())/series1.std() if series1.std()>0 else series1-series1.mean()
+            v2=(series2-series2.mean())/series2.std() if series2.std()>0 else series2-series2.mean()
+            min_len=min(len(v1), len(v2))
+            v1,v2=v1[:min_len], v2[:min_len]
+            dot_product=np.dot(v1,v2)
+            norm1,norm2=np.linalg.norm(v1), np.linalg.norm(v2)
+            return dot_product/
+    
         
 
 
