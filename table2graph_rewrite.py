@@ -180,7 +180,8 @@ class ColumnStatsExtractor:
             }
     def extract_string_stats(self, series):
         return {
-                "avg_length_elements": f" {series.str.len().mean()}",                "contains_numbers": f" {series.str.contains(self.digit_pattern).any()}",
+                "avg_length_elements": f" {series.str.len().mean()}",
+                "contains_numbers": f" {series.str.contains(self.digit_pattern).any()}",
             }
     #ToDo: Add datetime and categorical stat extractors
     def get_batch_stats(self, df, columns=None):
@@ -297,6 +298,56 @@ class RelationshipGenerator:
     def _compute_composite_score(self,edge_features):
         weights=self.thresholds['weight']
         return sum(edge_features[metric]*weights[metric] for metric in edge_features)
+    
+class FeatureTokenizer:
+    def __init__(self, model_manager):
+        self.model_manager=model_manager
+        self.model=model_manager.model
+        self.tokenizer=model_manager.tokenizer
+        self.device=model_manager.device
+        self.separator=" || "
+    def tokenize_column_stats(self,stats_dict):
+        column_text=self._stats_to_text(stats_dict)
+        tokens=self._tokenize_text(column_text)
+        embeddings=self._create_embeddings(tokens)
+        return embeddings
+    def _stats_to_text(self,stats_dict):
+        inner_stats=list(stats_dict.values())[0]
+        text_parts=[f"{k}:{v}" for k,v in inner_stats.items()]
+        return self.separator.join(text_parts)
+    def _tokenize_text(self,text):
+        tokens=self.tokenizer(
+            text,
+            padding=True,
+            return_tensors='pt'
+        )
+        tokens={k:v.to(self.device) for k,v in tokens.items()}
+        return tokens
+    def _create_embeddings(self, tokens):
+        with torch.no_grad:
+            embeddings=self.model.get_input_embeddings()(tokens['input_ids'])
+        return embeddings
+    def _pad_feature_list(self, feature_list):
+        #have to pad them anyway
+        if not feature_list:
+            return torch.empty(0)
+        max_length=max(features.shape[1] for features in feature_list)
+        embedding_dim=self.model.get_input_emebddings().embedding_dim
+        padded_features=[]
+        for features in feature_list:
+            current_length=features.shape[1]
+            if current_length<max_length:
+                padding=torch.zeros(1,
+                                    max_length-current_length,
+                                    embedding_dim,
+                                    device=self.device)
+                padded=torch.cat([features,padding], dim=1)
+            else:
+                padded=features
+            padded_features.append(padded.squeeze(0))
+        return torch.stack(padded_features)
+
+
     
 
 def generate_vllm(prompt):
