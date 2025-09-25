@@ -186,14 +186,16 @@ class ColumnStatsExtractor:
     #ToDo: Add datetime and categorical stat extractors
     def get_batch_stats(self, df, columns=None):
         if columns is None:
-            columns=df.columns.to_list()
+            columns=df.columns.tolist()
         batch_stats={}
         for col in columns:
             batch_stats[col]=self.get_col_stats(df, col)
         return batch_stats
 
 class RelationshipGenerator:
-    def __init__(self, threshold_config=None):
+    def __init__(self, model_manager, threshold_config=None):
+        self.model=model_manager.model
+        self.tokenizer=model_manager.tokenizer
         self.thresholds=threshold_config or {
             'composite_threshold':0.4,
             'weights': {
@@ -230,13 +232,13 @@ class RelationshipGenerator:
         }
     
     def cosine_similarity_names(self, col1, col2):
-        from sklearn.feature_extraction.text import TfidfVectorizer
         from sklearn.metrics.pairwise import cosine_similarity
-        col1_tokens=' '.join(col1.lower().replace('_', ' ').split())
-        col2_tokens=' '.join(col2.lower().replace('_', ' ').split())
-        vectorizer=TfidfVectorizer(analyzer='char', ngram_range=(2,3))
-        tfidf_matrix=vectorizer.fit_transform([col1_tokens, col2_tokens])
-        return cosine_similarity(tfidf_matrix[0:1],tfidf_matrix[1:2])[0][0]
+        col1_tokens=self.tokenizer(col1, return_tensors='pt', padding=True)
+        col2_tokens=self.tokenizer(col2, return_tensors='pt', padding=True)
+        with torch.no_grad():
+            col1_embeds=self.model.get_input_embeddings()(col1_tokens['input_ids']).mean(dim=1) #we are taking a mean of this value, why?
+            col2_embeds=self.model.get_input_embeddings()(col2_tokens['input_ids']).mean(dim=1)
+        return torch.cosine_similarity(col1_embeds, col2_embeds).item()
     
     def cosine_similarity_values(self, series1, series2):
         if pd.api.types.is_numeric_dtype(series1) and pd.api.types.is_numeric_dtype(series2):
@@ -296,7 +298,7 @@ class RelationshipGenerator:
             return 0.0
     
     def _compute_composite_score(self,edge_features):
-        weights=self.thresholds['weight']
+        weights=self.thresholds['weights']
         return sum(edge_features[metric]*weights[metric] for metric in edge_features)
     
 class FeatureTokenizer:
@@ -324,7 +326,7 @@ class FeatureTokenizer:
         tokens={k:v.to(self.device) for k,v in tokens.items()}
         return tokens
     def _create_embeddings(self, tokens):
-        with torch.no_grad:
+        with torch.no_grad():
             embeddings=self.model.get_input_embeddings()(tokens['input_ids'])
         return embeddings
     def _pad_feature_list(self, feature_list):
@@ -332,7 +334,7 @@ class FeatureTokenizer:
         if not feature_list:
             return torch.empty(0)
         max_length=max(features.shape[1] for features in feature_list)
-        embedding_dim=self.model.get_input_emebddings().embedding_dim
+        embedding_dim=self.model.get_input_embeddings().embedding_dim
         padded_features=[]
         for features in feature_list:
             current_length=features.shape[1]
@@ -348,11 +350,28 @@ class FeatureTokenizer:
         return torch.stack(padded_features)
     def batch_tokenize_columns(self, df, stats_extractor):
         feature_list=[]
-        for col in df.coumns:
+        for col in df.columns:
             col_stats=stats_extractor.get_col_stats(df,col)
             embeddings=self.tokenize_column_stats(col_stats)
             feature_list.append(embeddings)
         return self._pad_feature_list(feature_list)
+
+class GraphBuilder:
+    def __init__(self, model_manager, stats_extractor, feature_tokenizer):
+        self.model_manager=model_manager
+        self.stats_extractor=stats_extractor
+        self.feature_tokenizer=feature_tokenizer
+        self.graph=nx.Graph()
+    def table_to_graph(df):
+        node_features=[]
+        max_len=0
+        for col in df.columns
+        
+    
+
+
+
+# Upcoming Classes: Graph Builder, Graph Converter, GCNProcessor, Table2GraphPipeline
 
 
 
