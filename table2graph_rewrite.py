@@ -148,7 +148,7 @@ class DataProcessor:
                 if df[col].nunique()<10:
                     column_types[col]='categorical_numeric'
                 else:
-                    column_types[col]='continuous_nmeric'
+                    column_types[col]='continuous_numeric'
             elif pd.api.types.is_object_dtype(df[col]):
                 if df[col].str.match(r'\d{4}-\d{2}-\d{2}').any():
                     column_types[col]='date_string'
@@ -209,28 +209,44 @@ class RelationshipGenerator:
         self.sample_size=100 #For Jaccard~1000
     def compute_all_relationship_scores(self, df, stats_dict=None):
         relationships=[]
-        columns=df.columns.to_list()
+        columns=df.columns.tolist()
         for i, col1 in enumerate(columns):
-            for col2 in columns[i+1]:
+            for col2 in columns[i+1:]:
                 edge_features=self.compute_edge_features(df, col1, col2)
-            composite_score=self.compute_composite_score(edge_features)
-            if composite_score<=self.thresholds[composite_score]:
-                relationships.append({
-                    'col1':col1, #why col1 and col2?
-                    'col2':col2,
-                    'egde_features':edge_features,
-                    'composite_score':composite_score
-                })
+                composite_score=self._compute_composite_score(edge_features)
+                if composite_score>=self.thresholds['composite_threshold']:
+                    relationships.append({
+                        'col1':col1, #why col1 and col2?
+                        'col2':col2,
+                        'edge_features':edge_features,
+                        'composite_score':composite_score
+                    })
         return relationships
     def compute_edge_features(self, df, col1, col2):
         return {
             'name_similarity':self.cosine_similarity_names(col1, col2),
             'value_similarity':self.cosine_similarity_values(df[col1], df[col2]),
-            'jaccard_overlap':self.sampled_jaccard_overlap(df[col1], df[col2]),
+            'jaccard_overlap':self.sampled_jaccard_similarity(df[col1], df[col2]),
             'cardinality_similarity':self.cardinality_similarity(df[col1], df[col2]),
             'dtype_similarity':self.dtype_similarity(df[col1], df[col2])
         }
-    
+    def compute_labeled_relationships(self, df, label_generator):
+        relationships=[]
+        columns=df.columns.tolist()
+        for i, col1 in enumerate(columns):
+            for col2 in columns[i+1:]:
+                raw_features=self.compute_edge_features(df, col1, col2)
+                feature_label=label_generator.generate_feature_label(raw_features)
+                relationships.append({
+                    'col1':col1,
+                    'col2':col2,
+                    'feature_label':feature_label, #GNN PREDICTION TARGET
+                    'semantic_meaning':label_generator.get_semantic_interpretation(feature_label),
+                    'auxiliary_features':{'name_similarity':raw_features['name_similarity'],
+                    'cardinality_similarity':raw_features['cardinality_similarity']
+                    }
+                })
+        return relationships
     def cosine_similarity_names(self, col1, col2):
         from sklearn.metrics.pairwise import cosine_similarity
         col1_tokens=self.tokenizer(col1, return_tensors='pt', padding=True)
@@ -301,6 +317,60 @@ class RelationshipGenerator:
         weights=self.thresholds['weights']
         return sum(edge_features[metric]*weights[metric] for metric in edge_features)
     
+class SemanticLabelGenerator:
+    def __init__(self):
+        self.intervals={
+            'low':(0.00, 0.33),
+            'medium':(0.34, 0.67),
+            'high':(0.68, 1.00)
+        }
+        self.semantic_ontology=self._create_18_label_ontology()
+    def extract_core_features(self, edge_features):
+        return {
+            'cosine_relationality':edge_features['value_similarity'],
+            'jaccard_sampling':edge_features['jaccard_overlap'],
+            'same_dtype': 1 if edge_features['dtype_similarity']==1.0 else 0
+        }
+    def discretize_features(self, value, feature_name):
+        if feature_name=='same_dtype':
+            return 'NUM' if value==1 else 'CAT'
+        for interval, (low, high) in self.intervals.items():
+            if low<=value<=high:
+                return interval.upper()
+        return 'LOW' #fallback uhhh, judas gonna be mine
+    def generate_feature_label(self, edge_features):
+        core=self.extract_core_features(edge_features)
+        cos_interval=self.discretize_features(core['cosine_relationality'], 'cosine')
+        jac_interval=self.discretize_features(core['jaccard_sampling'], 'jaccard')
+        dtype_flag=self.discretize_features(core['same_dtype'], 'same_dtype')
+        return f"{cos_interval}_COS_{jac_interval}_JAC_{dtype_flag}"
+    def get_semantic_interpretation(self, feature_label):
+        return self.semantic_ontology.get(feature_label, "UNKNOWN_RELATIONSHIP")
+    def _create_18_label_ontology(self):    #EXTREMELY IMPORTANT, EVERYTHING HINGES ON THESE DEFINITIONS, HEART OF SEMANTIC EMERGENCE
+        return {
+            # HIGH COSINE (STRONG DIRECTIONAL RELATIONSHIP)
+            "HIGH_COS_HIGH_JAC_NUM":"LINEAR_NUMERICAL_DEPENDENCE_WITH_SHARED_VALUES",
+            "HIGH_COS_HIGH_JAC_CAT":"IDENTICAL_OR_REDUNDANT",
+            "HIGH_COS_MEDIUM_JAC_NUM":"COMPUTATIONAL_DEPENDENCE_WITH_SHARED_VALUES",
+            "HIGH_COS_MEDIUM_JAC_CAT":"STRONG_CATEGORICAL_RELATIONSHIP_PARTIAL_OVERLAP",
+            "HIGH_COS_LOW_JAC_NUM":"LINEAR_NUMERICAL_DEPENDENCE",
+            "HIGH_COS_LOW_JAC_CAT":"STRONG_CATEGORICAL_RELATIONSHIP_DISTINCT_VALUES",
+            # MEDIUM COSINE (MODERATE RELATIONSHIP)
+            "MEDIUM_COS_HIGH_JAC_NUM":"NUMERICAL_ALIAS_WITH_NOISE",
+            "MEDIUM_COS_HIGH_JAC_CAT":"MODERATE_CATEGORICAL_OVERLAP",
+            "MEDIUM_COS_MEDIUM_JAC_NUM":"MODERATE_NUMERICAL_CORRELATION_SHARED_VALUES",
+            "MEDIUM_COS_MEDIUM_JAC_CAT":"PARTIAL_CATEGORICAL_OVERLAP",
+            "MEDIUM_COS_LOW_JAC_NUM":"MODERATE_NUMERICAL_CORRELATION",
+            "MEDIUM_COS_LOW_JAC_CAT":"WEAK_CATEGORICAL_RELATIONSHIP",
+            # LOW COSINE (WEAK/NO DIRECTIONAL RELATIONSHIP)
+            "LOW_COS_HIGH_JAC_NUM":"NUMERICAL_IDENTITY_NO_CORRELATION",
+            "LOW_COS_HIGH_JAC_CAT":"CATEGORICAL_DERIVATION_OR_ALIAS",
+            "LOW_COS_MEDIUM_JAC_NUM":"SHARED_NUMERICAL_VALUES_NO_CORRELATION",
+            "LOW_COS_MEDIUM_JAC_CAT":"PARTIAL_CATEGORICAL_OVERLAP_NO_CORRELATION",
+            "LOW_COS_LOW_JAC_NUM":"WEAK_NUMERICAL_RELATIONSHIP",
+            "LOW_COS_LOW_JAC_CAT":"WEAK_HETEROGENEOUS_RELATIONSHIP"
+        }
+    
 class FeatureTokenizer:
     def __init__(self, model_manager):
         self.model_manager=model_manager
@@ -313,6 +383,10 @@ class FeatureTokenizer:
         tokens=self._tokenize_text(column_text)
         embeddings=self._create_embeddings(tokens)
         return embeddings
+    def tokenize_semantic_label(self, label_string):
+        text=f"relationship_type: {label_string}"
+        tokens=self._tokenize_text(text)
+        return self._create_embeddings(tokens)
     def _stats_to_text(self,stats_dict):
         inner_stats=list(stats_dict.values())[0]
         text_parts=[f"{k}:{v}" for k,v in inner_stats.items()]
@@ -355,17 +429,56 @@ class FeatureTokenizer:
             embeddings=self.tokenize_column_stats(col_stats)
             feature_list.append(embeddings)
         return self._pad_feature_list(feature_list)
+    def batch_tokenize_semantic_labels(self, label_list):
+        if not label_list:
+            return torch.empty(0)
+        label_embeddings=[]
+        for label in label_list:
+            embedding=self.tokenize_semantic_label(label)
+            label_embeddings.append(embedding)
+        return self._pad_feature_list(label_embeddings)
 
 class GraphBuilder:
-    def __init__(self, model_manager, stats_extractor, feature_tokenizer):
+    def __init__(self, model_manager, stats_extractor, feature_tokenizer, relationship_generator=None):
         self.model_manager=model_manager
         self.stats_extractor=stats_extractor
         self.feature_tokenizer=feature_tokenizer
+        self.relationship_generator=relationship_generator or RelationshipGenerator(model_manager)
+        self.semantic_label_generator=SemanticLabelGenerator()
         self.graph=nx.Graph()
-    def table_to_graph(df):
-        node_features=[]
-        max_len=0
-        for col in df.columns
+    def build_complete_graph(self,df):
+        #Create nodes with embedded stats
+        self.graph, node_features=self.create_column_nodes(df)
+        #Semantic relationship generator
+        relationships=self.relationship_generator.compute_labeled_relationships(df, self.semantic_label_generator)
+        #Add edges with embedded labels
+        edge_features=self.add_semantic_edges(relationships)
+        graph_data=self.prepare_for_gnn(node_features, edge_features)
+        return self.gtaph, graph_data
+    def create_column_nodes(self, df):
+        return "Under Construction"
+    def add_semantic_edges(self, relationships):
+        edge_features=[]
+        for rel in relationships:
+            self.graph.add_edge(
+                f"col_{rel['col1']}",
+                f"col_{rel['col2']}",
+                feature_label=rel['feature_label'],
+                semantic_meaning=rel['semantic_meaning'],
+                auxiliary_features=rel['auxiliary_features']
+            )
+            edge_features.append(rel['feature_label'])
+        return self.feature_tokenizer.batch_tokenize_semantic_labels(edge_features)
+    def prepare_for_gnn(self, node_features, edge_features):
+        return "Under Construction"
+    def get_graph_summary(self):
+        return {
+            'num_nodes':self.graph.number_of_nodes(),
+            'num_edges':self.graph.number_of_edges(),
+            'semantic_labels':[data['feature_label'] for _,_,data in self.graph.edges(data=True)],
+            'label_distribution':self._get_label_distribution()
+        }
+    
         
     
 
