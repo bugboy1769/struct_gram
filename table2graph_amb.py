@@ -192,6 +192,77 @@ class ColumnStatsExtractor:
             batch_stats[col]=self.get_col_stats(df, col)
         return batch_stats  
 
+class ColumnContentExtractor:
+    def __init__(self, sample_size=50, sampling_strategy='comprehensive'):
+        self.sample_size=sample_size
+        self.sampling_strategy=sampling_strategy
+        self.content_template="Column:{header} || DataType: {dtype} || Content: {content}"
+    def get_col_stats(self, df, col):
+        series=df[col]
+        sample_content=self._extract_comprehensive_sample(series)
+        formatted_content=self._format_content_for_tokenization(col, series, sample_content)
+        return {
+            f"column_name {col}": {
+                "column_content":formatted_content,
+                "column_header":col,
+                "sample_size":str(len(sample_content)),
+                "data_type":str(series.dtype)
+            }
+        }
+    def _extract_comprehensive_sample(self, series):
+        if self.sampling_strategy=="comprehensive":
+            return self._comprehensive_sample(series)
+        elif self.sampling_strategy=="balanced":
+            return self._balanced_sample(series)
+        elif self.sampling_strategy=="representative":
+            return self._representative_sample(series)
+        else:
+            return self._comprehensive_sample(series)
+    def _comprehensive_sample(self, series):
+        sample=[]
+        clean_series=series.dropna()
+        #Include Null Representations [1-2 slots]
+        if series.isnull().any():
+            null_count=min(2, self.sample_size//10)
+            sample.extend(["<NULL"]*null_count)
+        if len(clean_series)==0:
+            return ["<NULL>"]*self.sample_size
+        #Include Statistical Extremes [3-5 slots]
+        if pd.api.types._is_numeric_dtype(series):
+            extremes=[
+                clean_series.min(),
+                clean_series.max(),
+                clean_series.median()
+            ]
+            if self.sample_size>=40:
+                extremes.extend([
+                    clean_series.quantile(0.25),
+                    clean_series.quantile(0.75)
+                ])
+            sample.extend(extremes)
+        #Most Frequent Values [30% of remaining slots]
+        remaining_slots=self.sample_size-len(sample)
+        frequent_slots=max(1, int(remaining_slots*0.3))
+        value_counts=clean_series.value_counts()
+        frequent_values=value_counts.head(frequent_slots).index.tolist()
+        sample.extend(frequent_values)
+        #Random Sample From Non Frequent Value [50% of remaining slots]
+        remaining_slots=self.sample_size-len(sample)
+        random_slots=max(1, int(remaining_slots*0.5))
+        non_frequent=clean_series[~clean_series.isin(frequent_values)]
+        if len(non_frequent)>0:
+            random_sample_size=min(random_slots, len(non_frequent))
+            random_values=non_frequent.sample(random_sample_size, random_state=42).tolist()
+            sample.extend(random_values)
+        #Fill Remaining Slots with most common value
+        while len(sample)<self.sample_size:
+            if len(value_counts)>0:
+                sample.append(value_counts.index[0])
+            else:
+                sample.append("<EMPTY>")
+        return sample[:self.sample_size]
+
+
 class RelationshipGenerator:
     def __init__(self, model_manager, threshold_config=None):
         self.model=model_manager.model
