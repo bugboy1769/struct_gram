@@ -190,7 +190,7 @@ class ColumnStatsExtractor:
         batch_stats={}
         for col in columns:
             batch_stats[col]=self.get_col_stats(df, col)
-        return batch_stats
+        return batch_stats  
 
 class RelationshipGenerator:
     def __init__(self, model_manager, threshold_config=None):

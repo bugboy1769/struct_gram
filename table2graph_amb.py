@@ -261,6 +261,31 @@ class ColumnContentExtractor:
             else:
                 sample.append("<EMPTY>")
         return sample[:self.sample_size]
+    #ToDo: Implement other sampling methods, but lets stick to comprehensive for now
+    def _format_content_for_tokenization(self, col_name, series, sample_content):
+        formatted_values=[]
+        for value in sample_content:
+            if pd.isna(value) or value=="<NULL>":
+                formatted_values.append("<NULL>")
+            elif isinstance(value, (int, float)):
+                formatted_values.append(str(value))
+            else:
+                clean_value=' '.join(clean_value.split())[:100]
+            content_string=" | ".join(formatted_values)
+            return self.content_template.format(
+                header=col_name,
+                dtype=str(series.dtype),
+                content=content_string
+            )
+    def get_batch_stats(self,df,columns=None):
+        if columns is None:
+            columns=df.columns.tolist()
+        batch_content={}
+        for col in columns:
+            batch_content[col]=self.get_col_stats(df, col)
+        return batch_content
+
+        
 
 
 class RelationshipGenerator:
