@@ -786,7 +786,7 @@ class Table2GraphPipeLine:
 
 
 
-#ToDo -Run through additions, evaluate featuring, start thinking about the actual node features we want to map, distinguish between the features we want the mapping for and think about formatting them
+#ToDo -Run through additions, fix TableGCN, figure out running pipeline, data ingestion (also involves data collection)
         
     
 
