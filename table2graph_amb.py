@@ -193,13 +193,12 @@ class ColumnStatsExtractor:
         return batch_stats  
 
 class ColumnContentExtractor:
-    def __init__(self, sample_size=50, sampling_strategy='comprehensive'):
+    def __init__(self, sample_size=50):
         self.sample_size=sample_size
-        self.sampling_strategy=sampling_strategy
         self.content_template="Column:{header} || DataType: {dtype} || Content: {content}"
     def get_col_stats(self, df, col):
         series=df[col]
-        sample_content=self._extract_comprehensive_sample(series)
+        sample_content=self._comprehensive_sample(series)
         formatted_content=self._format_content_for_tokenization(col, series, sample_content)
         return {
             f"column_name {col}": {
@@ -209,26 +208,17 @@ class ColumnContentExtractor:
                 "data_type":str(series.dtype)
             }
         }
-    def _extract_comprehensive_sample(self, series):
-        if self.sampling_strategy=="comprehensive":
-            return self._comprehensive_sample(series)
-        elif self.sampling_strategy=="balanced":
-            return self._balanced_sample(series)
-        elif self.sampling_strategy=="representative":
-            return self._representative_sample(series)
-        else:
-            return self._comprehensive_sample(series)
     def _comprehensive_sample(self, series):
         sample=[]
         clean_series=series.dropna()
         #Include Null Representations [1-2 slots]
         if series.isnull().any():
             null_count=min(2, self.sample_size//10)
-            sample.extend(["<NULL"]*null_count)
+            sample.extend(["<NULL>"]*null_count)
         if len(clean_series)==0:
             return ["<NULL>"]*self.sample_size
         #Include Statistical Extremes [3-5 slots]
-        if pd.api.types._is_numeric_dtype(series):
+        if pd.api.types.is_numeric_dtype(series):
             extremes=[
                 clean_series.min(),
                 clean_series.max(),
@@ -270,13 +260,14 @@ class ColumnContentExtractor:
             elif isinstance(value, (int, float)):
                 formatted_values.append(str(value))
             else:
-                clean_value=' '.join(clean_value.split())[:100]
-            content_string=" | ".join(formatted_values)
-            return self.content_template.format(
-                header=col_name,
-                dtype=str(series.dtype),
-                content=content_string
-            )
+                clean_value=' '.join(str(value).split())[:100]
+                formatted_values.append(clean_value)
+        content_string=" | ".join(formatted_values)
+        return self.content_template.format(
+            header=col_name,
+            dtype=str(series.dtype),
+            content=content_string
+        )
     def get_batch_stats(self,df,columns=None):
         if columns is None:
             columns=df.columns.tolist()
@@ -344,13 +335,17 @@ class RelationshipGenerator:
                 })
         return relationships
     def cosine_similarity_names(self, col1, col2):
+        from sklearn.feature_extraction.text import TfidfVectorizer
         from sklearn.metrics.pairwise import cosine_similarity
-        col1_tokens=self.tokenizer(col1, return_tensors='pt', padding=True)
-        col2_tokens=self.tokenizer(col2, return_tensors='pt', padding=True)
-        with torch.no_grad():
-            col1_embeds=self.model.get_input_embeddings()(col1_tokens['input_ids']).mean(dim=1) #we are taking a mean of this value, why?
-            col2_embeds=self.model.get_input_embeddings()(col2_tokens['input_ids']).mean(dim=1)
-        return torch.cosine_similarity(col1_embeds, col2_embeds).item()
+        vectorizer=TfidfVectorizer(analyzer='char', ngram_range=(2,3))
+        #Using a model's tokenizer, not sure if the semantic benefits are justified against the computational overhead
+        #col1_tokens=self.tokenizer(col1, return_tensors='pt', padding=True)
+        #col2_tokens=self.tokenizer(col2, return_tensors='pt', padding=True)
+        # with torch.no_grad():
+        #     col1_embeds=self.model.get_input_embeddings()(col1_tokens['input_ids']).mean(dim=1) #we are taking a mean of this value, why?
+        #     col2_embeds=self.model.get_input_embeddings()(col2_tokens['input_ids']).mean(dim=1)
+        vectors=vectorizer.fit_transform([col1, col2])
+        return cosine_similarity(vectors[0], vectors[1])[0][0]
     
     def cosine_similarity_values(self, series1, series2):
         if pd.api.types.is_numeric_dtype(series1) and pd.api.types.is_numeric_dtype(series2):
@@ -534,46 +529,119 @@ class FeatureTokenizer:
             label_embeddings.append(embedding)
         return self._pad_feature_list(label_embeddings)
 
+class LightweightFeatureTokenizer:
+    def __init__(self, embedding_strategy='hybrid'):
+        self.embedding_strategy=embedding_strategy
+        self.semantic_encoder=None
+        self.vectorizer=None
+        self.feature_dim=512
+        self._initialize_encoders()
+    def _initialize_encoders(self):
+        if 'semantic' in self.embedding_strategy:
+            from sentence_transformers import SentenceTransformer
+            self.semantic_encoder=SentenceTransformer('all-MiniLM-L6-v2')
+        if 'statistical' in self.embedding_strategy:
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            self.vectorizer=TfidfVectorizer(max_features=256, ngram_range=(1,2))
+    def encode_column_content(self, content_dict):
+        inner_content=list(content_dict.values())[0]
+        content_text=inner_content['column_content']
+        dtype=inner_content['data_type']
+        sample_size=int(inner_content['sample_size']) # column header is not explicitly being stored
+        embeddings=[]
+        if self.semantic_encoder:
+            semantic_embed=self.semantic_encoder.encode(content_text)
+            embeddings.append(semantic_embed)
+        if self.vectorizer:
+            if hasattr(self.vectorizer, 'vocabulary_'):
+                statistical_embed=self.vectorizer.transform([content_text]).toarray()[0]
+                embeddings.append(statistical_embed)
+        metadata_features=self._engineer_metadata_features(dtype, sample_size, content_text)
+        embeddings.append(metadata_features)
+        if embeddings:
+            return np.concatenate(embeddings)
+        else:
+            return np.zeros(self.feature_dim)
+    def _engineer_metadata_features(self, dtype, sample_size, content_text):
+        features=[
+            1.0 if 'int' in dtype else 0.0,
+            1.0 if 'float' in dtype else 0.0,
+            1.0 if 'object' in dtype else 0.0,
+            sample_size/100.0, #Normalised sample size
+            content_text.count('<NULL>')/sample_size, #Null ratio
+            len(content_text)/1000.0, #Content length
+            content_text.count('|')/sample_size, #Value diversity
+            1.0 if any(c.isdigit() for c in content_text) else 0.0, #Contains numbers
+        ]
+        return np.array(features)
+    
 class GraphBuilder:
-    def __init__(self, model_manager, stats_extractor, feature_tokenizer, relationship_generator=None):
-        self.model_manager=model_manager
-        self.stats_extractor=stats_extractor
+    def __init__(self, content_extractor, feature_tokenizer, relationship_generator, semantic_label_generator, mode='train'):
+        self.content_extractor=content_extractor
         self.feature_tokenizer=feature_tokenizer
-        self.relationship_generator=relationship_generator or RelationshipGenerator(model_manager)
-        self.semantic_label_generator=SemanticLabelGenerator()
-        self.graph=nx.Graph()
-    def build_complete_graph(self,df):
-        #Create nodes with embedded stats
-        self.graph, node_features=self.create_column_nodes(df)
-        #Semantic relationship generator
+        self.relationship_generator=relationship_generator
+        self.semantic_label_generator=semantic_label_generator
+        self.mode=mode
+        #Classification Setup
+        self.label_to_index=self._create_label_mapping()
+        self.index_to_label={v:k for k,v in self.label_to_index.items()}
+        self.num_classes=len(self.label_to_index)
+    def _create_label_mapping(self):
+        ontology=self.semantic_label_generator.semantic_ontology
+        return {label: idx for idx, label in enumerate(ontology.keys())}
+    def build_graph(self, df):
+        #Main Orchestration Method, returns torch_geometric data object for GNN processing
+        #1: Create embedded nodes for columns
+        node_features, node_mapping=self._create_embedded_nodes(df)
+        if self.mode=='train':
+            edge_index, edge_labels=self._create_supervised_edges(df, node_mapping)
+        else: #Test Mode
+            edge_index=self._create_candidate_edges(df, node_mapping)
+            edge_labels=None #Will be predicted
+        return self._to_pytorch_geometric(node_features, edge_index, edge_labels)
+    def _create_embedded_nodes(self, df):
+        node_features=[]
+        node_mapping={} #column_name -> node_index
+        for idx, col in enumerate(df.columns):
+            content_dict=self.content_extractor.get_col_stats(df, col)
+            embedding=self.feature_tokenizer.encode_column_content(content_dict)
+            node_features.append(embedding)
+            node_mapping[col]=idx
+        return torch.stack([torch.tensor(f, dtype=torch.float32) for f in node_features]), node_mapping
+    def _create_supervised_edges(self, df, node_mapping):
+        #Creating edges with ground truth labels for supervision
         relationships=self.relationship_generator.compute_labeled_relationships(df, self.semantic_label_generator)
-        #Add edges with embedded labels
-        edge_features=self.add_semantic_edges(relationships)
-        graph_data=self.prepare_for_gnn(node_features, edge_features)
-        return self.gtaph, graph_data
-    def create_column_nodes(self, df):
-        return "Under Construction"
-    def add_semantic_edges(self, relationships):
-        edge_features=[]
+        edge_index=[]
+        edge_labels=[]
         for rel in relationships:
-            self.graph.add_edge(
-                f"col_{rel['col1']}",
-                f"col_{rel['col2']}",
-                feature_label=rel['feature_label'],
-                semantic_meaning=rel['semantic_meaning'],
-                auxiliary_features=rel['auxiliary_features']
-            )
-            edge_features.append(rel['feature_label'])
-        return self.feature_tokenizer.batch_tokenize_semantic_labels(edge_features)
-    def prepare_for_gnn(self, node_features, edge_features):
-        return "Under Construction"
-    def get_graph_summary(self):
-        return {
-            'num_nodes':self.graph.number_of_nodes(),
-            'num_edges':self.graph.number_of_edges(),
-            'semantic_labels':[data['feature_label'] for _,_,data in self.graph.edges(data=True)],
-            'label_distribution':self._get_label_distribution()
-        }
+            #Sparse Connectivity to avoid emulating a MLP cosplaying as a graph
+            if self._passes_thresholds(rel):
+                src_idx=node_mapping[rel['col1']]
+                dst_idx=node_mapping[rel['col2']]
+                #Undirected Edges: Add both directions
+                edge_index.extend([[src_idx, dst_idx], [dst_idx, src_idx]])
+                #Convert Semantic Label to classification index
+                label_idx=self.label_to_index[rel['feature_label']]
+                edge_labels.extend([label_idx, label_idx])
+        return torch.tensor(edge_index).T, torch.tensor(edge_labels, dtype=torch.long)
+    def _create_candidate_edges(self, df, node_mapping):
+        #Create candidate edges for predictions
+        relationships=self.relationship_generator.compute_all_relationship_scores(df)
+        edge_index=[]
+        for rel in relationships:
+            #Same threshold logic as training
+            src_idx=node_mapping[rel['col1']]
+            dst_idx=node_mapping[rel['col2']]
+            #Undirected edges
+            edge_index.extend([src_idx, dst_idx], [dst_idx, src_idx])
+        return torch.tensor(edge_index).T if edge_index else torch.empty((2,0), dtype=torch.long)
+    def _passes_threshold(self, relationship):
+        return relationship.get('composite_score', 0)>=self.relationship_generator.thresholds['composite_threshold']
+    def _to_pytorch_geometric(self, node_features, edge_index, edge_labels=None):
+        data=Data(x=node_features, edge_index=edge_index)
+        if edge_labels is not None:
+            data.edge_attr=edge_labels
+        return data
 
 #ToDo -Run through additions, evaluate featuring, start thinking about the actual node features we want to map, distinguish between the features we want the mapping for and think about formatting them
         
