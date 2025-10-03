@@ -642,6 +642,149 @@ class GraphBuilder:
         if edge_labels is not None:
             data.edge_attr=edge_labels
         return data
+class GNNEdgePredictor(torch.nn.Module):
+    #3 Layer GNN to capture direct + transitive relationships
+    #Edge prediction via node embedding concatenation
+    #Separate Classifier Head
+    #Built-in training and test steps
+    def __init__(self, node_dim, hidden_dim=256, num_classes=18, num_layers=3, dropout=0.1):
+        super().__init__()
+        #3-hop GNN
+        self.gnn=TableGCN(
+            input_dim=node_dim,
+            hidden_dim=hidden_dim,
+            output_dim=hidden_dim,
+            num_layers=num_layers
+        )
+        #Edge Classifier: Concatenated Node Embeds -> Edge Labels
+        self.edge_classifier=torch.nn.Sequential(torch.nn.Linear(hidden_dim*2, hidden_dim),
+                                                 torch.nn.ReLU(),
+                                                 torch.nn.Dropout(dropout),
+                                                 torch.nn.Linear(hidden_dim, hidden_dim//2),
+                                                 torch.nn.ReLU(),
+                                                 torch.nn.Dropout(dropout),
+                                                 torch.nn.Linear(hidden_dim//2, num_classes)
+                                                 )
+        self.criteion=torch.nn.CrossEntropyLoss()
+        self.optimizer=torch.optim.Adam(self.parameters(), lr=0.01) #Tweak Tweak
+    def forward(self, pyg_data):
+        #Forward Pass: Node Features -> GNN -> Edge Predictions
+        # ---
+        #Update Node Embeds (3-hop)
+        node_embeddings=self.gnn(pyg_data.x, pyg_data.edge_index)
+        #Get source and dest embeds
+        src_embeddings=node_embeddings[pyg_data.edge_index[0]]
+        dst_embeddings=node_embeddings[pyg_data.edge_index[1]]
+        #Concat for edge classification
+        edge_embeddings=torch.cat([src_embeddings, dst_embeddings], dim=1)
+        #Classify edge types
+        edge_logits=self.edge_classifier(edge_embeddings)
+        return edge_logits
+    def train_step(self, pyg_data):
+        self.train()
+        self.optimizer.zero_grad()
+        edge_logits=self.forward(pyg_data)
+        loss=self.criteion(edge_logits, pyg_data.edge_attr)
+        loss.backward()
+        self.optimizer.step()
+        #Calculate accuracy for monitoring
+        predictions=torch.argmax(edge_logits, dim=1)
+        accuracy=(predictions==pyg_data.edge_attr).float().mean() #Pooling!!
+        return loss.item(), accuracy.item()
+    def predict(self, pyg_data):
+        self.eval()
+        with torch.no_grad():
+            edge_logits=self.forward(pyg_data)
+            predictions=torch.argmax(edge_logits, dim=1)
+            confidences=torch.softmax(edge_logits, dim=1)
+            max_confidences=torch.max(confidences, dim=1)[0]
+        return predictions, max_confidences
+class Table2GraphPipeLine:
+    def __init__(self, embedding_strategy='hybrid'):
+        self.content_extractor=ColumnContentExtractor
+        self.feature_tokenizer=LightweightFeatureTokenizer(embedding_strategy)
+        self.relationship_generator=None #We keep this None for the classification task, maybe later when we move to more complex architectures which capture relationality we can think about embedding similarity
+        self.semantic_label_generator=SemanticLabelGenerator()
+        #Graph Builders
+        self.train_builder=None
+        self.test_builder=None
+        self.predictor=None
+    def initialize_for_training(self, model_manager=None, node_dim=512):
+        #Init RelationshipGenerator if needed
+        if self.relationship_generator is None:
+            self.relationship_generator=RelationshipGenerator(model_manager, threshold_config={'composite_threshold':0.3})
+        self.train_builder=GraphBuilder(
+            self.content_extractor,
+            self.feature_tokenizer,
+            self.relationship_generator,
+            self.semantic_label_generator,
+            mode='train'
+        )
+        self.predictor=GNNEdgePredictor(
+            node_dim=node_dim,
+            hidden_dim=256,
+            num_classes=self.train_builder.num_classes,
+            num_layers=3
+        )
+    def initialise_for_testing(self):
+        self.test_builder=GraphBuilder(
+            self.content_extractor,
+            self.feature_tokenizer,
+            self.relationship_generator,
+            self.semantic_label_generator,
+            mode='test'
+        )
+    def train_epoch(self, table_dataframes):
+        #Train on multiple tables for each epoch
+        total_loss=0
+        total_accuracy=0
+        num_batches=0
+        for df in table_dataframes:
+            try:
+                pyg_data=self.train_builder.build_graph(df)
+                if pyg_data.edge_index.size(1)>0:
+                    loss, accuracy = self.predictor.train_step(pyg_data)
+                    total_loss+=loss
+                    total_accuracy+=accuracy
+                    num_batches+=1
+            except Exception as e:
+                print(f"Warning: Skipped Table due to error {e}")
+        avg_loss=total_loss/max(num_batches, 1)
+        avg_accuracy=total_accuracy/max(num_batches, 1)
+        return avg_loss, avg_accuracy
+    def predict_relationships(self, df):
+        pyg_data=self.test_builder.build_graph(df)
+        if pyg_data.edge_index.size(1)==0:
+            return [] #No candidate edges
+        predictions, confidences=self.predictor.predict(pyg_data)
+        #Convert back to semantic labels ??
+        results=[]
+        columns=list(df.columns)
+        #Process Edges
+        processed_pairs=set()
+        for i, (src_idx, dst_idx) in enumerate(pyg_data.edge_index.T):
+            src_col=columns[src_idx.item()]
+            dst_col=columns[dst_idx.item()]
+            #Skip if already processed
+            pair_key=tuple(sorted([src_col, dst_col]))
+            if pair_key in processed_pairs:
+                continue
+            processed_pairs.add(pair_key)
+            #Convert Prediction to Semantic Label
+            label_idx=predictions[i].item()
+            confidence=confidences[i].item()
+            semantic_label=self.test_builder.index_to_label[label_idx]
+            results.append({
+                'col1': src_col,
+                'col2':dst_col,
+                'predicted_label':semantic_label,
+                'confidence':confidence,
+                'semantic_meaning':self.semantic_label_generator.get_semantic_interpretation(semantic_label)
+            })
+        return results
+
+
+
 
 #ToDo -Run through additions, evaluate featuring, start thinking about the actual node features we want to map, distinguish between the features we want the mapping for and think about formatting them
         
