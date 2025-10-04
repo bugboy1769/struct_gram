@@ -428,9 +428,9 @@ class RelationshipGenerator:
             return min(1.0, containtment_ratio*min(cardinality_ratio/10, 1.0)*name_boost)
         return containtment_ratio*0.3 #partial credit for some containment
     def detect_heirarchical_patterns(self, series1, series2):
-        
-        
-        
+        if not (pd.api.types.is_string_dtype(series1) or pd.api.types.is_object_dtype(series1)) or not (pd.api.types.is_string_dtype(series2) or pd.api.types.is_object_dtype(series2)):
+            return 0.0
+        s1_sample
 
     
     def _compute_composite_score(self,edge_features):
