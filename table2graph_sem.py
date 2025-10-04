@@ -403,6 +403,35 @@ class RelationshipGenerator:
             return 0.7
         else:
             return 0.0
+    def detect_id_reference_pattern(self, series1, series2):
+        if series1.dtype=='float64' and series2.dtype=='float64':
+            return 0.0
+        s1_clean=series1.dropna()
+        s2_clean=series2.dropna()
+        if len(s1_clean)==0 or len(s2_clean)==0:
+            s1_unique=set(s1_clean.unique())
+            s2_unique=set(s2_clean.unique())
+            if len(s2_unique)==0:
+                return 0.0
+        #Check for containment: s2 in s1
+        containtment_ratio=len(s2_unique & s1_unique)/len(s2_unique)
+        #Check for cardinality ratio: s1.unique > s2.unique for FK reln
+        cardinality_ratio=len(s1_unique)/max(len(s2_unique), 1)
+        #Boost score if ID patterns
+        col1_name=str(series1.name).lower() if series1.name else "" #is series1.name valid call?
+        col2_name=str(series2.name).lower() if series2.name else ""
+        name_boost=1.0
+        if ('id' in col1_name and 'id' in col2_name) or (col1_name.endswith('_id') or col2_name.endswith('_id')):
+            name_boost=1.3
+        #FK Score: High containment + good cardinality ratio
+        if containtment_ratio>0.7 and cardinality_ratio>1.5:
+            return min(1.0, containtment_ratio*min(cardinality_ratio/10, 1.0)*name_boost)
+        return containtment_ratio*0.3 #partial credit for some containment
+    def detect_heirarchical_patterns(self, series1, series2):
+        
+        
+        
+
     
     def _compute_composite_score(self,edge_features):
         weights=self.thresholds['weights']
