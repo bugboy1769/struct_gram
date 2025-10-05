@@ -430,8 +430,136 @@ class RelationshipGenerator:
     def detect_heirarchical_patterns(self, series1, series2):
         if not (pd.api.types.is_string_dtype(series1) or pd.api.types.is_object_dtype(series1)) or not (pd.api.types.is_string_dtype(series2) or pd.api.types.is_object_dtype(series2)):
             return 0.0
-        s1_sample
+        s1_sample=series1.dropna().astype(str).sample(min(50, len(series1.dropna())), random_state=42)
+        s2_sample=series2.dropna().astype(str).sample(min(50, len(series2.dropna())), random_state=42)
+        if len(s1_sample)==0 or len(s2_sample)==0:
+            return 0.0
+        #Check if values in one column are substrings or prefixes of other
+        substring_s1_in_s2=0
+        substring_s2_in_s1=0
+        for v1 in s1_sample:
+            if any(str(v1).lower() in str(v2).lower() for v2 in s2_sample):
+                substring_s1_in_s2+=1
+        for v2 in s2_sample:
+            if any(str(v2).lower() in str(v1).lower() for v1 in s1_sample):
+                substring_s2_in_s1+=1
+        s1_substring_score=substring_s1_in_s2/len(s1_sample)
+        s2_substring_score=substring_s2_in_s1/len(s2_sample)
+        #Check cardinality heirarchy
+        card1, card2 = series1.nunique(), series2.nunique()
+        heirarchy_score=0.0
+        if card1<card2 and card1>0:
+            heirarchy_score=min(card2/card1, 10)/10 #Cap at reasonable ratio
+        elif card2<card1 and card2>0:
+            heirarchy_score=min(card1/card2, 10)/10
+        return max(s1_substring_score, s2_substring_score)*0.7 + heirarchy_score*0.3
+    def detect_functional_dependency(self, series1, series2):
+        df_temp=pd.DataFrame({'s1':series1, 's2':series2}).dropna()
+        if len(df_temp)<5: #Min requirement for analysis
+            return 0.0
+        try:
+            grouped=df_temp.groupby('s1')['s2'].nunique()
+            if len(grouped)==0:
+                return 0.0
+            functional_dependency_score=(grouped==1).sum()/len(grouped)
+            s1_unique, s2_unique=series1.nunique(), series2.nunique()
+            if s1_unique>0 and s2_unique>0:
+                cardinality_factor=min(s1_unique/s2_unique, 5)/5
+                return functional_dependency_score*(0.8+0.2*cardinality_factor)
+            return functional_dependency_score
+        except Exception:
+            return 0.0
+    def detect_measure_dimension_pattern(self, series1, series2):
+        #Check for numeric-categorical pair
+        s1_numeric=pd.api.types.is_numeric_dtype(series1)
+        s2_numeric=pd.api.types.is_numeric_dtype(series2)
+        if s1_numeric==s2_numeric:
+            return 0.0
+        #Identify measure v dimension
+        if s1_numeric:
+            measure_col, dimension_col=series1, series2
+        else:
+            measure_col, dimension_col=series2, series1
+        #Remove nulls
+        df_temp=pd.DataFrame({'measure':measure_col, 'dimension':dimension_col}).dropna()
+        if len(df_temp)<5:
+            return 0.0
+        try:
+            #Check aggregation potential
+            grouped_stats=df_temp.groupby('dimension')['measure'].agg(['count', 'std', 'mean'])
+            if len(grouped_stats)<2: #Need multiple groups
+                return 0.0
+            #General Direction: Good measure-dimension pairs will have
+            #1. Multiple records per dimension value(aggregatable)
+            #2. Variation in measures across dimensions
+            #3. Reasonable number of dimension categories
+            avg_count_per_group=grouped_stats['count'].mean()
+            std_of_means=grouped_stats['mean'].std()
+            overall_std=df_temp['measure'].std()
+            #Scoring
+            aggregation_potential=min(avg_count_per_group/3, 1.0)
+            variation_score=(std_of_means/overall_std) if overall_std>0 else 0
+            cardinality_score=1.0 if 2<= dimension_col.nunique()<=20 else 0.5
+            return (aggregation_potential*0.4+variation_score*0.4+cardinality_score*0.2)
+        except Exception:
+            return 0.0
+    def detect_temporal_dependency(self, series1, series2):
+        s1_datetime=pd.api.types.is_datetime64_any_dtype(series1)
+        s2_datetime=pd.api.types.is_datetime64_any_dtype(series2)
 
+        if not s1_datetime and pd.api.types.is_object_dtype(series1):
+            try:
+                pd.to_datetime(series1.dropna().head(10))
+                s1_datetime=True
+            except:
+                pass
+        if not s2_datetime and pd.api.types.is_object_dtype(series2):
+            try:
+                pd.to_datetime(series2.dropna().head(10))
+                s2_datetime=True
+            except:
+                pass
+        if not (s1_datetime and s2_datetime):
+            if pd.api.types.is_numeric_dtype(series1) and pd.api.types.is_numeric_dtype(series2):
+                return self._detect_numeric_sequence_correlation(series1, series1)
+            return 0.0
+        try:
+            #Convert to datetime if needed
+            if s1_datetime and not pd.api.types.is_datetime64_any_dtype(series1):
+                dt1=pd.to_datetime(series1, errors='coerce')
+            else:
+                dt1=series1
+            if s2_datetime and not pd.api.types.is_datetime64_any_dtype(series2):
+                dt2=pd.to_datetime(series2, errors='corece')
+            else:
+                dt2=series2
+            df_temp=pd.DataFrame({'dt1':dt1, 'dt2':dt2}).dropna()
+            if len(df_temp)<5:
+                return 0.0
+            #Check for temporal corr
+            correlation=df_temp['dt1'].astype('int64').corr(df_temp['dt2'].astype('int64'))
+            #Check for consistent time gaps
+            time_diffs=(df_temp['dt2']-df_temp['dt1']).dt.total_seconds()
+            consistent_gap=time_diffs.std()/(time_diffs.mean() + 1e-10) if len(time_diffs)>1 else 1
+            #Combine corr and consistency
+            temporal_score=abs(correlation)*0.7+(1/(1+consistent_gap))*0.3 #on that sigmoid type shi
+            return min(temporal_score, 1.0)
+        except Exception:
+            return 0.0
+    def _detect_numeric_sequence_correlation(self, series1, series2):
+        try:
+            df_temp=pd.DataFrame({'s1':series1, 's2':series2}).dropna()
+            if len(df_temp)<5:
+                return 0.0
+            correlation=df_temp['s1'].corr(df_temp['s2'])
+            s1_diffs=df_temp['s1'].diff().dropna()
+            s2_diffs=df_temp['s2'].diff().dropna()
+            if len(s1_diffs)>0 and len(s2_diffs)>0:
+                diff_correlation=s1_diffs.corr(s2_diffs)
+                return abs(correlation)*0.6 + abs(diff_correlation)*0.4
+            return abs(correlation)*0.8
+        except Exception:
+            return 0.0
     
     def _compute_composite_score(self,edge_features):
         weights=self.thresholds['weights']
@@ -813,7 +941,7 @@ class Table2GraphPipeLine:
         return results
 
 
-
+#Primary ToDo: Run through the semantic features and infuse an LLM for actual semantic reasoning, the scores are only there for judgement based on scores+table_context+scenario_context
 
 #ToDo -Run through additions, fix TableGCN, figure out running pipeline, data ingestion (also involves data collection)
 
