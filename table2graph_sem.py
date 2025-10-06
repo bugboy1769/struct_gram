@@ -565,7 +565,7 @@ class RelationshipGenerator:
         weights=self.thresholds['weights']
         return sum(edge_features[metric]*weights[metric] for metric in edge_features)
     
-class SemanticLabelGenerator:
+class SemanticLabelGenerator: #Will require serious rework
     def __init__(self):
         self.intervals={
             'low':(0.00, 0.33),
@@ -939,6 +939,7 @@ class Table2GraphPipeLine:
                 'semantic_meaning':self.semantic_label_generator.get_semantic_interpretation(semantic_label)
             })
         return results
+    
 
 
 #Primary ToDo: Run through the semantic features and infuse an LLM for actual semantic reasoning, the scores are only there for judgement based on scores+table_context+scenario_context
