@@ -1,0 +1,3593 @@
+╭───────────────────────────────────────────────────────────╮
+│ ✻ Welcome to Claude Code!                                 │
+│                                                           │
+│   /help for help, /status for your current setup          │
+│                                                           │
+│   cwd: /Users/shwetabhsingh/Documents/GitHub/struct_gram  │
+╰───────────────────────────────────────────────────────────╯
+
+
+ What's new:
+  • Enable /context command for Bedrock and Vertex
+  • Add mTLS support for HTTP-based OpenTelemetry exporters
+  • Set `CLAUDE_BASH_NO_LOGIN` environment variable to 1 or true to to skip 
+  login shell for BashTool
+  • Fix Bedrock and Vertex environment variables evaluating all strings as 
+  truthy
+  • No longer inform Claude of the list of allowed tools when permission is 
+  denied
+
+> okay, here is my current implement of 
+  @table2graph_rewrite.py , the general structure is 
+  outlined in @classexport.txt , you should fetch design 
+  direction from there. Now, suggest to me the next 
+  possible class I should include here and lay it out.
+  ⎿  Read table2graph_rewrite.py (394 lines)
+  ⎿  Read classexport.txt (1732 lines)
+
+⏺ Looking at your current implementation and the design
+  direction from classexport.txt, you have:
+  - ✅ ModelManager classes (HFModel, vLLMModel)
+  - ✅ DataProcessor
+  - ✅ ColumnStatsExtractor
+  - ✅ RelationshipGenerator (empty stub)
+
+  Next Class to Implement: FeatureTokenizer
+
+  This class bridges your statistical analysis to the
+  neural network components. Here's the implementation:
+
+  class FeatureTokenizer:
+      """
+      Handle tokenization and embedding extraction from 
+  column statistics.
+      Converts statistical dictionaries to neural 
+  network-ready tensors.
+      """
+
+      def __init__(self, model_manager):
+          self.model_manager = model_manager
+          self.model = model_manager.model
+          self.tokenizer = model_manager.tokenizer
+          self.device = model_manager.device
+          self.separator = " || "
+
+      def tokenize_column_stats(self, stats_dict):
+          """
+          Convert column statistics to embeddings
+          
+          Args:
+              stats_dict (dict): Output from 
+  ColumnStatsExtractor.get_col_stats()
+              
+          Returns:
+              torch.Tensor: Embeddings for the column 
+  statistics
+          """
+          column_text = self._stats_to_text(stats_dict)
+          tokens = self._tokenize_text(column_text)
+          embeddings = self._create_embeddings(tokens)
+          return embeddings
+
+      def _stats_to_text(self, stats_dict):
+          """Convert stats dictionary to formatted text 
+  string"""
+          # Extract inner stats dictionary (removes outer
+   column_name key)
+          inner_stats = list(stats_dict.values())[0]
+          text_parts = [f"{k}:{v}" for k, v in
+  inner_stats.items()]
+          return self.separator.join(text_parts)
+
+      def _tokenize_text(self, text):
+          """Tokenize text using model's tokenizer"""
+          tokens = self.tokenizer(
+              text,
+              padding=True,
+              return_tensors='pt'
+          )
+          # Move to device
+          tokens = {k: v.to(self.device) for k, v in
+  tokens.items()}
+          return tokens
+
+      def _create_embeddings(self, tokens):
+          """Create embeddings from tokens using model's 
+  embedding layer"""
+          with torch.no_grad():
+              embeddings =
+  self.model.get_input_embeddings()(tokens['input_ids'])
+          return embeddings
+
+      def batch_tokenize_columns(self, df, 
+  stats_extractor):
+          """
+          Tokenize statistics for all columns in 
+  DataFrame
+          
+          Args:
+              df (pd.DataFrame): Input DataFrame
+              stats_extractor (ColumnStatsExtractor): 
+  Instance to extract stats
+              
+          Returns:
+              torch.Tensor: Padded feature tensor for all
+   columns
+          """
+          feature_list = []
+
+          for col in df.columns:
+              col_stats =
+  stats_extractor.get_col_stats(df, col)
+              embeddings =
+  self.tokenize_column_stats(col_stats)
+              feature_list.append(embeddings)
+
+          return self._pad_feature_list(feature_list)
+
+      def _pad_feature_list(self, feature_list):
+          """Pad feature tensors to same length for batch
+   processing"""
+          if not feature_list:
+              return torch.empty(0)
+
+          # Find maximum sequence length
+          max_length = max(features.shape[1] for features
+   in feature_list)
+          embedding_dim =
+  self.model.get_input_embeddings().embedding_dim
+
+          padded_features = []
+          for features in feature_list:
+              current_length = features.shape[1]
+              if current_length < max_length:
+                  padding = torch.zeros(1,
+                                      max_length -
+  current_length,
+                                      embedding_dim,
+                                      device=self.device)
+                  padded = torch.cat([features, padding],
+   dim=1)
+              else:
+                  padded = features
+              padded_features.append(padded.squeeze(0))
+
+          return torch.stack(padded_features)
+
+  Why FeatureTokenizer Next:
+
+  1. Natural Flow: DataProcessor → ColumnStatsExtractor →
+   FeatureTokenizer → GraphBuilder
+  2. Critical Bridge: Converts your statistical analysis
+  into neural network inputs
+  3. Dependencies Ready: Requires ModelManager and
+  ColumnStatsExtractor (both implemented)
+  4. Enables Graph Building: GraphBuilder will need these
+   tokenized features as node embeddings
+
+  Usage Pattern:
+  # Initialize components
+  model_manager = HFModel()
+  model_manager.set_model("m1")
+  model_manager.set_and_move_device()
+
+  data_processor = DataProcessor()
+  stats_extractor = ColumnStatsExtractor()
+  feature_tokenizer = FeatureTokenizer(model_manager)
+
+  # Process pipeline
+  df = data_processor.load_data("data.csv")
+  feature_tensor =
+  feature_tokenizer.batch_tokenize_columns(df,
+  stats_extractor)
+
+⏺ This FeatureTokenizer implementation handles the
+  conversion from your statistical analysis to neural
+  embeddings, setting up the foundation for graph
+  construction.
+
+> look at @table2graph_rewrite.py , and recalibrate your 
+  suggestions, i think you did not see the updated file.
+  ⎿  Read table2graph_rewrite.py (394 lines)
+
+⏺ Looking at your updated file, I see you've implemented
+  more classes than I initially realized. Here are the
+  bugs I found:
+
+  Critical Bugs:
+
+  1. Line 151: Typo
+  # Bug:
+  column_types[col]='continuous_nmeric'
+  # Fix:
+  column_types[col]='continuous_numeric'
+
+  2. Line 212: Wrong method name
+  # Bug:
+  columns=df.columns.to_list()
+  # Fix:
+  columns=df.columns.tolist()
+
+  3. Line 214: Missing slice notation
+  # Bug:
+  for col2 in columns[i+1]:
+  # Fix:
+  for col2 in columns[i+1:]:
+
+  4. Line 216: Indentation error - should be inside the
+  inner loop
+  # Bug:
+  for col2 in columns[i+1]:
+      edge_features=self.compute_edge_features(df, col1,
+  col2)
+  composite_score=self.compute_composite_score(edge_featu
+  res)
+  # Fix:
+  for col2 in columns[i+1:]:
+      edge_features=self.compute_edge_features(df, col1,
+  col2)
+      composite_score=self.compute_composite_score(edge_f
+  eatures)
+
+  5. Line 217: Wrong threshold key and comparison
+  operator
+  # Bug:
+  if composite_score<=self.thresholds[composite_score]:
+  # Fix:
+  if composite_score>=self.thresholds['composite_threshol
+  d']:
+
+  6. Line 221: Typo in key name
+  # Bug:
+  'egde_features':edge_features,
+  # Fix:
+  'edge_features':edge_features,
+
+  7. Line 229: Wrong method name
+  # Bug:
+  'jaccard_overlap':self.sampled_jaccard_overlap(df[col1]
+  , df[col2]),
+  # Fix:
+  'jaccard_overlap':self.sampled_jaccard_similarity(df[co
+  l1], df[col2]),
+
+  8. Line 365: Missing self parameter and syntax error
+  # Bug:
+  def table_to_graph(df):
+      node_features=[]
+      max_len=0
+      for col in df.columns
+  # Fix:
+  def table_to_graph(self, df):
+      node_features=[]
+      max_len=0
+      for col in df.columns:
+
+  Current Status:
+  - ✅ HFModel, vLLMModel
+  - ✅ DataProcessor
+  - ✅ ColumnStatsExtractor
+  - ✅ RelationshipGenerator (implemented but has bugs)
+  - ✅ FeatureTokenizer (implemented)
+  - 🚧 GraphBuilder (partially implemented, has bugs)
+
+  Next Class to Complete: GraphBuilder
+
+  Since GraphBuilder is started but incomplete, here's
+  the complete implementation:
+
+  class GraphBuilder:
+      def __init__(self, model_manager, stats_extractor, 
+  feature_tokenizer):
+          self.model_manager=model_manager
+          self.stats_extractor=stats_extractor
+          self.feature_tokenizer=feature_tokenizer
+          self.graph=nx.Graph()
+
+      def table_to_graph(self, df):
+          """Convert DataFrame to NetworkX graph with 
+  node features"""
+          self.graph.clear()  # Reset graph
+
+          # Create node features for all columns
+          node_features =
+  self.feature_tokenizer.batch_tokenize_columns(df,
+  self.stats_extractor)
+
+          # Add column nodes to graph
+          for idx, col in enumerate(df.columns):
+              self.graph.add_node(f"col_{col}",
+                                node_type="column",
+                                column_name=col,
+
+  features=node_features[idx])
+
+          return self.graph, node_features
+
+      def add_relationships(self, df, 
+  relationship_generator):
+          """Add edges based on relationship scores"""
+          relationships = relationship_generator.compute_
+  all_relationship_scores(df)
+
+          for rel in relationships:
+              self.graph.add_edge(f"col_{rel['col1']}",
+                                 f"col_{rel['col2']}",
+                                 **rel['edge_features'],
+
+  composite_score=rel['composite_score'])
+
+          return len(relationships)
+
+⏺ Fix these bugs first, then complete the GraphBuilder
+  implementation.
+
+> okay, now you have some work, look at the add 
+  relationships part of the GraphBuilder and 
+  RelationshipBuilder. The crux of the problem here is to 
+  create labels for which the GNN can be trained. The 
+  approach I have in mind is currently create effective 
+  interval combinations for each of my edge features, and 
+  map them to labels. For each of these labels, I maintain 
+  a semantic ontology mapping dict, which consists of these
+   labels as keys, and how to interpret these interval 
+  combinations as values. The general theory is described 
+  in @"A Framework for GNN-Driven Tabular Data Interpreta" 
+  . A sample dict structure is provided to you in @"Start 
+  research - Start research.csv" . Now, construct a class 
+  or a method, whatever suits the project best to create a 
+  full semantic_ontology_mapping_dict for each interval 
+  suggested in the theory. The purpose of this is to train 
+  the GNN to predict these labels and then the label key 
+  can be mapped to its interpretation. Remember that for 
+  GNN preprocessing everything will need to be embedded 
+  into an LLMs vector space, so keep things compatible, if 
+  FeatureTokenizer needs an update, suggest that as well. 
+  Do not make any changes, start by outlining and 
+  suggesting your approach in detail first. think
+  ⎿ Read A Framework for GNN-Driven Tabular Data Interpreta 
+    (5 lines)
+  ⎿  Read Start research - Start research.csv (9 lines)
+
+✻ Thinking…
+
+  This is a very interesting problem. The user wants to 
+  implement a semantic ontology mapping system based on the 
+  theoretical framework they've shared. Let me break down 
+  what I understand:
+
+  1. Goal: Create a system that maps edge feature 
+  combinations to semantic labels that can be used to train a
+   GNN for relationship prediction rather than just 
+  regression on raw similarity scores.
+  2. Current Edge Features: 
+    - cosine similarity (names and values)
+    - jaccard similarity 
+    - cardinality similarity
+    - dtype similarity
+  3. The Framework: The theory document describes a 
+  discretization scheme where:
+    - Features are normalized to [0,1] range
+    - They're discretized into intervals (low: 0.00-0.33, 
+  medium: 0.34-0.67, high: 0.68-1.00)
+    - These intervals are combined with a same_dtype flag to 
+  create composite labels
+    - Each composite label maps to a semantic interpretation
+  4. Current Issues:
+    - The RelationshipGenerator has bugs in the 
+  compute_all_relationship_scores method
+    - There's indentation issues and wrong threshold access
+    - The GraphBuilder is incomplete
+    - Need to create the full semantic ontology mapping
+  5. What needs to be built:
+    - A discretization system for edge features
+    - A label generation system based on feature combinations
+    - A semantic ontology dictionary with all 18+ 
+  combinations
+    - Integration with the existing FeatureTokenizer for 
+  embedding these labels
+
+  Looking at the sample CSV, I can see examples like:
+  - HIGH_COS_LOW_JAC_NUM -> LINEAR_NUMERICAL_DEPENDENCE
+  - LOW_COS_HIGH_JAC_CAT -> CATEGORICAL_DERIVATION_OR_ALIAS
+  - etc.
+
+  The theory suggests there should be 18 combinations based 
+  on:
+  - 3 cosine intervals × 3 jaccard intervals × 2 dtype 
+  categories = 18 combinations
+
+  But looking more closely at the current 
+  RelationshipGenerator, they have 5 edge features:
+
+  I now realize the complexity has increased significantly. 
+  The original framework assumed 3-4 features, but we're 
+  dealing with 5 distinct similarity measures: name 
+  similarity, value similarity, jaccard overlap, cardinality,
+   and dtype. This exponentially increases the potential 
+  combination space and requires a more nuanced approach to 
+  feature discretization and semantic labeling. The existing 
+  code has critical implementation errors, including 
+  incorrect threshold access and problematic indentation that
+   will prevent accurate relationship scoring.
+
+  The proposed solution involves creating a sophisticated 
+  semantic labeling system that transforms raw numerical 
+  similarity features into meaningful categorical 
+  relationship types. By discretizing edge features and 
+  mapping them to semantic labels like 
+  "LINEAR_NUMERICAL_DEPENDENCE", we shift from raw score 
+  prediction to understanding deeper structural relationships
+   between data columns. This approach allows the graph 
+  neural network to learn more abstract, contextually rich 
+  representations of column interactions.
+
+  The implementation strategy requires comprehensive 
+  refactoring: developing a dedicated SemanticLabelGenerator,
+   modifying the RelationshipGenerator's logic, and 
+  potentially updating the FeatureTokenizer to handle these 
+  more complex embeddings. Each step aims to convert 
+  low-level similarity metrics into high-level semantic 
+  understanding.
+
+✻ Thinking…
+
+  Now I need to analyze the framework and design a 
+  comprehensive approach. Let me think through this 
+  systematically:
+
+  1. Current State Analysis:
+    - RelationshipGenerator has 5 edge features but bugs in 
+  implementation
+    - GraphBuilder is incomplete 
+    - Need semantic labeling system as described in the 
+  framework
+    - Framework focuses on training GNN to predict 
+  relationship types rather than raw scores
+  2. Framework Analysis:
+    - 3-tier discretization: low (0.00-0.33), medium 
+  (0.34-0.67), high (0.68-1.00)
+    - Combination of cosine + jaccard + same_dtype creates 18
+   labels
+    - Each label maps to semantic interpretation
+    - Goal: Train GNN to predict these semantic labels
+  3. Current Edge Features vs Framework:
+  Framework suggests: cosine_relationality + jaccard_sampling
+   + same_dtype
+  Current implementation has: name_similarity + 
+  value_similarity + jaccard_overlap + cardinality_similarity
+   + dtype_similarity
+
+  3. I need to figure out how to map the current 5 features 
+  to the framework's approach.
+  4. Design Approach:
+  I think the best approach is to create a 
+  SemanticLabelGenerator class that:
+    - Takes the raw edge features from RelationshipGenerator
+    - Discretizes them according to the framework intervals
+    - Maps combinations to semantic labels
+    - Provides the full ontology dictionary
+    - Can be used by GraphBuilder to create labeled edges for
+   GNN training
+
+  Let me outline this in detail.
+
+⏺ Based on the framework documents and your current
+  implementation, here's my detailed approach for
+  implementing the semantic ontology mapping system:
+
+  Analysis of Current State vs Framework Requirements
+
+  Framework Goal: Train GNN to predict semantic
+  relationship labels (e.g.,
+  "LINEAR_NUMERICAL_DEPENDENCE") rather than raw
+  similarity scores, enabling emergent interpretive
+  behavior.
+
+  Current Gap: Your RelationshipGenerator computes 5 raw
+  edge features, but lacks the discretization → labeling
+  → semantic mapping pipeline described in the framework.
+
+  Proposed Architecture
+
+  1. SemanticLabelGenerator Class (New)
+
+  class SemanticLabelGenerator:
+      """
+      Converts raw edge features into semantic 
+  relationship labels
+      based on discretized intervals and rule-based 
+  mapping.
+      """
+
+      def __init__(self):
+          self.intervals = {
+              'low': (0.00, 0.33),
+              'medium': (0.34, 0.67),
+              'high': (0.68, 1.00)
+          }
+          self.semantic_ontology =
+  self._create_full_ontology_dict()
+
+      def discretize_features(self, edge_features):
+          """Convert raw scores to interval labels"""
+
+      def generate_composite_label(self, 
+  discretized_features):
+          """Create composite label key from intervals"""
+
+      def get_semantic_interpretation(self, label_key):
+          """Get human interpretation from ontology 
+  dict"""
+
+      def _create_full_ontology_dict(self):
+          """Build complete 18-label semantic ontology"""
+
+  2. Key Design Decisions
+
+  Feature Mapping Strategy:
+  - Use value_similarity as primary cosine measure
+  (framework's "cosine_relationality")
+  - Use jaccard_overlap directly (framework's
+  "jaccard_sampling")
+  - Use dtype_similarity to determine same_dtype flag
+  - Keep name_similarity and cardinality_similarity as
+  auxiliary features
+
+  Label Structure:
+  - Primary labels: 18 combinations from cosine × jaccard
+   × dtype (as per framework)
+  - Extended labels: Include auxiliary features for
+  richer semantics
+  - Format: HIGH_COS_LOW_JAC_NUM →
+  "LINEAR_NUMERICAL_DEPENDENCE"
+
+  3. Integration Points
+
+  RelationshipGenerator Updates:
+  # Current bugs to fix:
+  # Line 217: 
+  composite_score>=self.thresholds[composite_score] → 
+  composite_score>=self.thresholds['composite_threshold']
+    
+  # Line 216-223: Fix indentation (composite_score inside
+   inner loop)
+  # Line 221: 'egde_features' → 'edge_features'
+
+  # New additions:
+  def compute_labeled_relationships(self, df, 
+  label_generator):
+      """Generate relationships with semantic labels 
+  instead of raw scores"""
+      relationships = []
+      columns = df.columns.tolist()
+
+      for i, col1 in enumerate(columns):
+          for col2 in columns[i+1:]:
+              raw_features =
+  self.compute_edge_features(df, col1, col2)
+              semantic_label =
+  label_generator.generate_composite_label(
+
+  label_generator.discretize_features(raw_features)
+              )
+
+              relationships.append({
+                  'col1': col1,
+                  'col2': col2,
+                  'semantic_label': semantic_label,
+                  'raw_features': raw_features  # Keep 
+  for debugging
+              })
+
+      return relationships
+
+  GraphBuilder Integration:
+  def add_semantic_relationships(self, df, 
+  relationship_generator, label_generator):
+      """Add edges with semantic labels for GNN 
+  training"""
+      labeled_relationships = relationship_generator.comp
+  ute_labeled_relationships(df, label_generator)
+
+      for rel in labeled_relationships:
+          self.graph.add_edge(
+              f"col_{rel['col1']}",
+              f"col_{rel['col2']}",
+              semantic_label=rel['semantic_label'],
+              label_embedding=None  # To be filled by 
+  FeatureTokenizer
+          )
+
+  4. FeatureTokenizer Updates Needed
+
+  New Requirements:
+  - Embed semantic label strings (e.g.,
+  "LINEAR_NUMERICAL_DEPENDENCE")
+  - Handle both node features (column stats) AND edge
+  features (semantic labels)
+  - Create unified embedding space for GNN
+
+  Proposed Extensions:
+  def tokenize_semantic_label(self, semantic_label):
+      """Convert semantic label to embedding for edge 
+  features"""
+
+  def create_heterogeneous_embeddings(self, graph):
+      """Create embeddings for both nodes (columns) and 
+  edges (relationships)"""
+
+  5. Complete Ontology Dictionary Structure
+
+  Based on framework theory, create 18+ semantic
+  mappings:
+
+  semantic_ontology = {
+      "HIGH_COS_LOW_JAC_NUM":
+  "LINEAR_NUMERICAL_DEPENDENCE",
+      "LOW_COS_HIGH_JAC_CAT":
+  "CATEGORICAL_DERIVATION_OR_ALIAS",
+      "LOW_COS_LOW_JAC_CAT":
+  "WEAK_HETEROGENEOUS_RELATIONSHIP",
+      "MED_COS_LOW_JAC_NUM":
+  "MODERATE_NUMERICAL_CORRELATION",
+      # ... complete all 18 combinations
+
+      # Extended labels using auxiliary features:
+      "HIGH_NAME_HIGH_COS_LOW_JAC_NUM":
+  "COMPUTED_COLUMN_RELATIONSHIP",
+      "HIGH_CARD_LOW_COS_HIGH_JAC_CAT":
+  "HIERARCHICAL_CATEGORICAL_RELATIONSHIP"
+  }
+
+  6. Training Pipeline Flow
+
+  Raw Data → EdgeFeatures → Discretization →
+  SemanticLabels → Embeddings → GNN Training
+      ↓           ↓              ↓              ↓
+        ↓           ↓
+     CSV    [0.85,0.21,...]  [HIGH,LOW,...]
+  "LINEAR_..."   [768-dim]  Predict Labels
+
+  Questions for Clarification:
+
+  1. Feature Priority: Should I map your 5 current
+  features to the framework's 3 core features, or extend
+  the framework to handle all 5?
+  2. Label Granularity: Do you want the basic 18 labels
+  from the framework, or an extended set that
+  incorporates all your current features?
+  3. GNN Training Target: Should the GNN predict the
+  label key (e.g., "HIGH_COS_LOW_JAC_NUM") or the
+  semantic interpretation (e.g.,
+  "LINEAR_NUMERICAL_DEPENDENCE")?
+
+✻ Thinking…
+
+  I've provided a comprehensive analysis and approach for 
+  implementing the semantic ontology mapping system. The key 
+  points are:
+
+  1. SemanticLabelGenerator Class: A new class that will 
+  handle the discretization of raw edge features into 
+  intervals, map combinations to semantic labels, and 
+  maintain the ontology dictionary.
+  2. Integration Strategy: How to modify the existing 
+  RelationshipGenerator and GraphBuilder to use semantic 
+  labels instead of raw scores.
+  3. FeatureTokenizer Updates: Extensions needed to handle 
+  semantic label embeddings for the GNN.
+  4. Complete Pipeline: From raw data to GNN training on 
+  semantic labels rather than raw similarity scores.
+
+  The user asked me to think about this and not make changes 
+  yet, just outline the approach. I've done that 
+  comprehensively. They also mentioned fixing bugs in the 
+  current implementation, which I've identified:
+
+  - Line 217: Wrong threshold access
+  - Indentation issues in the relationship computation loop  
+  - Typo in 'edge_features'
+
+  I'm waiting for their feedback on the approach before 
+  proceeding with implementation.
+
+⏺ This approach transforms your raw similarity
+  computation into a semantic relationship classification
+   system, enabling the GNN to learn interpretable
+  relationship types rather than just numerical
+  correlations. The framework's core insight is that
+  teaching the GNN to predict
+  "LINEAR_NUMERICAL_DEPENDENCE" creates more
+  generalizable knowledge than predicting a cosine
+  similarity of 0.87.
+
+> Okay, so to answer your questions, i want you to map the 
+  5 features to the three core features i have selected, 
+  you do not necessarily need to map everything and 
+  construct arbitrary relationships, we can either just 
+  dicard a useless feature or we can keep it, we do not 
+  have to necessarily use it.\
+  \
+  second, let us go ahead with the 18 basic labels for now,
+   as i am worried increasing the amount of labels will 
+  also require an increase in the amount of training data, 
+  i do not want that for now.\
+  \
+  third, it doesn't matter what label the GNN is predicting
+   as at the end of the day, the labels are just a way to 
+  map to the real semantic ontology held in my dict. The 
+  choice here is instead, what labels will be best for the 
+  GNN, whether its labelling based on the features or a 
+  more descriptive approach. I feel labelling should be 
+  edge feature based instead of semantic, so go ahead with 
+  outlining for that unless you feel its not correct. think
+
+✻ Thinking…
+
+  The user has clarified:
+
+  1. Map 5 features to 3 core features - don't force 
+  arbitrary mappings, can discard if needed
+  2. Go with 18 basic labels for now to avoid needing more 
+  training data
+  3. GNN should predict feature-based labels (like 
+  "HIGH_COS_LOW_JAC_NUM") rather than semantic labels (like 
+  "LINEAR_NUMERICAL_DEPENDENCE") since the mapping to 
+  semantics happens via the dictionary
+
+  Let me think about the feature mapping:
+
+  Current 5 features:
+  - name_similarity (cosine similarity of column names using 
+  LLM embeddings)
+  - value_similarity (cosine similarity of column values)  
+  - jaccard_overlap (sampled jaccard similarity)
+  - cardinality_similarity (ratio of unique counts)
+  - dtype_similarity (hierarchical dtype comparison)
+
+  Framework's 3 core features:
+  - cosine_relationality (0-1) 
+  - jaccard_sampling (0-1)
+  - same_dtype (binary flag)
+
+  Mapping:
+  - cosine_relationality ← value_similarity (this is the main
+   one, represents actual data relationships)
+  - jaccard_sampling ← jaccard_overlap (direct mapping)
+  - same_dtype ← dtype_similarity (but need to convert to 
+  binary: 1.0 → 1, anything else → 0)
+
+  What about name_similarity and cardinality_similarity?
+  - name_similarity: Could be useful but not in the 
+  framework's core theory. Maybe keep as auxiliary but don't 
+  use in the 18 labels
+  - cardinality_similarity: Also useful but not core. Maybe 
+  keep as auxiliary
+
+  So the approach would be:
+  1. Use value_similarity, jaccard_overlap, and 
+  dtype_similarity (converted to binary) for the 18-label 
+  system
+  2. Keep name_similarity and cardinality_similarity as 
+  additional edge attributes but not part of the labeling 
+  system
+  3. Create feature-based labels like "HIGH_COS_LOW_JAC_NUM" 
+
+  4. Map these to semantic interpretations in the dictionary
+
+  I'll focus on the feature-based labeling strategy. By using
+   direct feature measurements, we create a more transparent 
+  and adaptable approach. The feature-based labels provide a 
+  clear, quantitative representation of column relationships.
+   This method allows the GNN to learn mappings directly from
+   computed features, with semantic nuance added through 
+  dictionary lookup. It separates the technical feature 
+  assessment from higher-level interpretation, making the 
+  system more flexible and interpretable.
+
+⏺ Looking at your clarifications, here's my refined
+  approach:
+
+  Feature Mapping Strategy
+
+  Core Features (for 18-label system):
+  - value_similarity → cosine_relationality (primary
+  relationship signal)
+  - jaccard_overlap → jaccard_sampling (direct mapping)
+  - dtype_similarity → same_dtype (convert to binary: 1.0
+   → 1, else → 0)
+
+  Auxiliary Features (keep but don't use in labeling):
+  - name_similarity - useful for debugging/analysis but
+  not core to data relationships
+  - cardinality_similarity - supplementary info, store as
+   edge attribute
+
+  Rationale: The framework's theory focuses on data 
+  relationships (value cosine) and value overlap
+  (jaccard), with dtype as context. Name similarity and
+  cardinality are useful but secondary.
+
+  SemanticLabelGenerator Design
+
+  class SemanticLabelGenerator:
+      """
+      Converts 3 core edge features into 18 feature-based
+   labels
+      for GNN training, with semantic interpretation 
+  mapping.
+      """
+
+      def __init__(self):
+          self.intervals = {
+              'low': (0.00, 0.33),
+              'medium': (0.34, 0.67),
+              'high': (0.68, 1.00)
+          }
+          self.semantic_ontology =
+  self._create_18_label_ontology()
+
+      def extract_core_features(self, edge_features):
+          """Extract and transform core features for 
+  labeling"""
+          return {
+              'cosine_relationality':
+  edge_features['value_similarity'],
+              'jaccard_sampling':
+  edge_features['jaccard_overlap'],
+              'same_dtype': 1 if
+  edge_features['dtype_similarity'] == 1.0 else 0
+          }
+
+      def discretize_feature(self, value, feature_name):
+          """Convert continuous value to interval 
+  label"""
+          if feature_name == 'same_dtype':
+              return 'NUM' if value == 1 else 'CAT'
+
+          for interval, (low, high) in
+  self.intervals.items():
+              if low <= value <= high:
+                  return interval.upper()
+          return 'LOW'  # fallback
+
+      def generate_feature_label(self, edge_features):
+          """Create feature-based label key"""
+          core =
+  self.extract_core_features(edge_features)
+
+          cos_interval =
+  self.discretize_feature(core['cosine_relationality'],
+  'cosine')
+          jac_interval =
+  self.discretize_feature(core['jaccard_sampling'],
+  'jaccard')
+          dtype_flag =
+  self.discretize_feature(core['same_dtype'],
+  'same_dtype')
+
+          return
+  f"{cos_interval}_COS_{jac_interval}_JAC_{dtype_flag}"
+
+      def get_semantic_interpretation(self, 
+  feature_label):
+          """Map feature label to semantic meaning"""
+          return
+  self.semantic_ontology.get(feature_label,
+  "UNKNOWN_RELATIONSHIP")
+
+  18-Label Ontology Structure
+
+  def _create_18_label_ontology(self):
+      """Complete mapping of feature combinations to 
+  semantic interpretations"""
+      return {
+          # High cosine (strong directional relationship)
+          "HIGH_COS_HIGH_JAC_NUM":
+  "LINEAR_NUMERICAL_DEPENDENCE_WITH_SHARED_VALUES",
+          "HIGH_COS_HIGH_JAC_CAT":
+  "IDENTICAL_OR_REDUNDANT",
+          "HIGH_COS_MEDIUM_JAC_NUM":
+  "COMPUTATIONAL_DEPENDENCE_WITH_SHARED_VALUES",
+          "HIGH_COS_MEDIUM_JAC_CAT":
+  "STRONG_CATEGORICAL_RELATIONSHIP_PARTIAL_OVERLAP",
+          "HIGH_COS_LOW_JAC_NUM":
+  "LINEAR_NUMERICAL_DEPENDENCE",
+          "HIGH_COS_LOW_JAC_CAT":
+  "STRONG_CATEGORICAL_RELATIONSHIP_DISTINCT_VALUES",
+
+          # Medium cosine (moderate relationship) 
+          "MEDIUM_COS_HIGH_JAC_NUM":
+  "NUMERICAL_ALIAS_WITH_NOISE",
+          "MEDIUM_COS_HIGH_JAC_CAT":
+  "MODERATE_CATEGORICAL_OVERLAP",
+          "MEDIUM_COS_MEDIUM_JAC_NUM":
+  "MODERATE_NUMERICAL_CORRELATION_SHARED_VALUES",
+          "MEDIUM_COS_MEDIUM_JAC_CAT":
+  "PARTIAL_CATEGORICAL_OVERLAP",
+          "MEDIUM_COS_LOW_JAC_NUM":
+  "MODERATE_NUMERICAL_CORRELATION",
+          "MEDIUM_COS_LOW_JAC_CAT":
+  "WEAK_CATEGORICAL_RELATIONSHIP",
+
+          # Low cosine (weak/no directional relationship)
+          "LOW_COS_HIGH_JAC_NUM":
+  "NUMERICAL_IDENTITY_NO_CORRELATION",
+          "LOW_COS_HIGH_JAC_CAT":
+  "CATEGORICAL_DERIVATION_OR_ALIAS",
+          "LOW_COS_MEDIUM_JAC_NUM":
+  "SHARED_NUMERICAL_VALUES_NO_CORRELATION",
+          "LOW_COS_MEDIUM_JAC_CAT":
+  "PARTIAL_CATEGORICAL_OVERLAP_NO_CORRELATION",
+          "LOW_COS_LOW_JAC_NUM":
+  "WEAK_NUMERICAL_RELATIONSHIP",
+          "LOW_COS_LOW_JAC_CAT":
+  "WEAK_HETEROGENEOUS_RELATIONSHIP"
+      }
+
+  Integration with RelationshipGenerator
+
+  def compute_labeled_relationships(self, df, 
+  label_generator):
+      """Generate relationships with feature-based 
+  labels"""
+      relationships = []
+      columns = df.columns.tolist()
+
+      for i, col1 in enumerate(columns):
+          for col2 in columns[i+1:]:
+              raw_features =
+  self.compute_edge_features(df, col1, col2)
+              feature_label =
+  label_generator.generate_feature_label(raw_features)
+
+              relationships.append({
+                  'col1': col1,
+                  'col2': col2,
+                  'feature_label': feature_label,  # GNN 
+  prediction target
+                  'semantic_meaning': label_generator.get
+  _semantic_interpretation(feature_label),
+                  'raw_features': raw_features,  # Keep 
+  all 5 for analysis
+                  'auxiliary_features': {
+                      'name_similarity':
+  raw_features['name_similarity'],
+                      'cardinality_similarity':
+  raw_features['cardinality_similarity']
+                  }
+              })
+
+      return relationships
+
+  Why Feature-Based Labels Are Better for GNN:
+
+  1. Direct Feature Mapping: "HIGH_COS_LOW_JAC_NUM"
+  directly corresponds to computed features
+  2. Deterministic: No ambiguity in label assignment from
+   features
+  3. Learnable Patterns: GNN can learn feature→label
+  patterns more easily
+  4. Separation of Concerns: GNN predicts labels,
+  dictionary handles semantics
+  5. Debugging: Easy to verify label correctness from raw
+   features
+
+  Training Flow:
+  Edge Features → Feature Label → GNN Training Target
+  [0.85, 0.21, 1] → "HIGH_COS_LOW_JAC_NUM" → GNN predicts
+   this string
+
+  Post-prediction: "HIGH_COS_LOW_JAC_NUM" → Dictionary →
+  "LINEAR_NUMERICAL_DEPENDENCE"
+
+  This approach keeps the GNN focused on learning feature
+   patterns while maintaining the rich semantic
+  interpretability through the ontology dictionary.
+
+> okay, can you now do a run on @table2graph_rewrite.py and
+   check for any logical and syntax bugs before we move 
+  ahead?
+  ⎿  Read table2graph_rewrite.py (464 lines)
+
+⏺ Critical Bugs Found:
+
+  Syntax Errors:
+
+  1. Line 217: Wrong threshold key and indentation
+  # Bug:
+              if
+  composite_score>=self.thresholds[composite_score]:
+  # Fix:
+              if composite_score>=self.thresholds['compos
+  ite_threshold']:
+
+  2. Line 216-223: Indentation error - composite_score
+  calculation is outside the inner loop
+  # Bug:
+  for col2 in columns[i+1:]:
+      edge_features=self.compute_edge_features(df, col1,
+  col2)
+      composite_score=self.compute_composite_score(edge_f
+  eatures)
+  if composite_score>=self.thresholds['composite_threshol
+  d']:
+  # Fix:
+  for col2 in columns[i+1:]:
+      edge_features=self.compute_edge_features(df, col1,
+  col2)
+      composite_score=self.compute_composite_score(edge_f
+  eatures)
+      if composite_score>=self.thresholds['composite_thre
+  shold']:
+
+  3. Line 311: Missing function call parentheses
+  # Bug:
+  self.semantic_ontology=self.create_18_label_ontology_di
+  ct
+  # Fix:
+  self.semantic_ontology=self._create_18_label_ontology()
+
+  4. Line 323: Missing function call parentheses
+  # Bug:
+  return interval.upper
+  # Fix:
+  return interval.upper()
+
+  Logical Errors:
+
+  5. Line 316: Missing method call in
+  RelationshipGenerator
+  # Bug:
+  composite_score=self.compute_composite_score(edge_featu
+  res)
+  # Fix:
+  composite_score=self._compute_composite_score(edge_feat
+  ures)
+
+  6. SemanticLabelGenerator: Method name mismatch
+  # Bug in line 311:
+  self.semantic_ontology=self.create_18_label_ontology_di
+  ct
+  # But method is named (line 333):
+  def _create_18_label_ontology(self):
+  # Fix:
+  self.semantic_ontology=self._create_18_label_ontology()
+
+  Missing Implementation:
+
+  7. Line 435-439: GraphBuilder.table_to_graph() is
+  incomplete
+  def table_to_graph(self, df):
+      self.graph.clear()
+      node_features=self.feature_tokenizer.batch_tokenize
+  _columns(df, self.stats_extractor)
+      max_len=0
+      # Missing implementation
+
+  Required Fixes:
+
+  # 
+  RelationshipGenerator.compute_all_relationship_scores()
+   - fix indentation and threshold key
+  def compute_all_relationship_scores(self, df, 
+  stats_dict=None):
+      relationships=[]
+      columns=df.columns.tolist()
+      for i, col1 in enumerate(columns):
+          for col2 in columns[i+1:]:
+
+  edge_features=self.compute_edge_features(df, col1,
+  col2)
+              composite_score=self._compute_composite_sco
+  re(edge_features)
+              if composite_score>=self.thresholds['compos
+  ite_threshold']:
+                  relationships.append({
+                      'col1':col1,
+                      'col2':col2,
+                      'edge_features':edge_features,
+                      'composite_score':composite_score
+                  })
+      return relationships
+
+  # SemanticLabelGenerator - fix method calls
+  class SemanticLabelGenerator:
+      def __init__(self):
+          self.intervals={
+              'low':(0.00, 0.33),
+              'medium':(0.34, 0.67),
+              'high':(0.68, 1.00)
+          }
+
+  self.semantic_ontology=self._create_18_label_ontology()
+    # Fix: add parentheses
+
+      def discretize_features(self, value, feature_name):
+          if feature_name=='same_dtype':
+              return 'NUM' if value==1 else 'CAT'
+          for interval, (low, high) in
+  self.intervals.items():
+              if low<=value<=high:
+                  return interval.upper()  # Fix: add 
+  parentheses
+          return 'LOW'
+
+  # GraphBuilder - complete implementation
+  def table_to_graph(self, df):
+      """Convert DataFrame to NetworkX graph with node 
+  features"""
+      self.graph.clear()
+      node_features =
+  self.feature_tokenizer.batch_tokenize_columns(df,
+  self.stats_extractor)
+
+      # Add column nodes to graph
+      for idx, col in enumerate(df.columns):
+          self.graph.add_node(f"col_{col}",
+                            node_type="column",
+                            column_name=col,
+                            features=node_features[idx])
+
+      return self.graph, node_features
+
+⏺ Priority: Fix the indentation bug (lines 216-223) first
+   - it will cause the relationship generation to fail
+  completely. The other syntax errors will prevent the
+  code from running at all.
+
+> okay, have a check now
+
+⏺ Excellent! Most of the critical bugs have been fixed.
+  Here are the remaining issues:
+
+  One Remaining Bug:
+
+  Line 327: Method name mismatch
+  # Bug:
+  self.semantic_ontology=self._create_18_label_ontology_d
+  ict()
+  # But the actual method name is (line 349):
+  def _create_18_label_ontology(self):
+  # Fix:
+  self.semantic_ontology=self._create_18_label_ontology()
+
+  Code Quality Issues:
+
+  Missing Integration Method in GraphBuilder:
+  You'll need a method to add the semantic relationships
+  to the graph:
+
+  def add_semantic_relationships(self, df, 
+  relationship_generator, label_generator):
+      """Add edges with semantic labels to the graph"""
+      labeled_relationships = relationship_generator.comp
+  ute_labeled_relationships(df, label_generator)
+
+      for rel in labeled_relationships:
+          self.graph.add_edge(
+              f"col_{rel['col1']}",
+              f"col_{rel['col2']}",
+              feature_label=rel['feature_label'],
+              semantic_meaning=rel['semantic_meaning'],
+
+  auxiliary_features=rel['auxiliary_features']
+          )
+
+      return len(labeled_relationships)
+
+  Status Summary:
+
+  ✅ Fixed: Indentation bugs, threshold key, method
+  calls, GraphBuilder implementation🚫 Remaining: One
+  method name bug in SemanticLabelGenerator⚠️ Missing:
+  Integration method for adding semantic edges to graph
+
+  The code structure is now solid and the semantic
+  labeling system is properly implemented. Once you fix
+  the method name bug, the classes should work together
+  correctly.
+
+> okay, now let us move on to implementing the GraphBuilder
+   class, look at the current state, look at the state of 
+  StatsExtractor, RelationshipManager, 
+  SemanticLabelGenerator and FeatureTokenizer, and then 
+  outline descriptively a proper implementation of the 
+  GraphBuilder class. Make sure to look for 
+  incompatibiltity issues. think
+
+✻ Thinking…
+
+  Let me analyze the current state of each class to 
+  understand how they work together and what the GraphBuilder
+   class needs to do:
+
+  1. ColumnStatsExtractor: 
+    - Takes df and column name, returns nested dict with 
+  stats
+    - Format: {f"column_name {col}": {"column_name": f" 
+  {col}", "column_data_type": f" {str(series.dtype)}", ...}}
+    - Has methods for numeric stats, string stats, and batch 
+  processing
+  2. RelationshipGenerator:
+    - Takes model_manager in constructor
+    - Has compute_edge_features() that returns dict with 5 
+  features
+    - Has compute_labeled_relationships() that uses 
+  SemanticLabelGenerator to create feature labels
+    - Returns relationships with col1, col2, feature_label, 
+  semantic_meaning, auxiliary_features
+  3. SemanticLabelGenerator:
+    - Takes edge features and converts to 18-label system
+    - Maps 3 core features (value_similarity, 
+  jaccard_overlap, dtype_similarity) to feature labels like 
+  "HIGH_COS_LOW_JAC_NUM"
+    - Has semantic ontology dict to map labels to 
+  interpretations
+  4. FeatureTokenizer:
+    - Takes model_manager in constructor
+    - tokenize_column_stats() takes stats dict and returns 
+  embeddings
+    - batch_tokenize_columns() processes all columns and 
+  returns padded tensor of shape [num_columns, seq_len, 
+  embedding_dim]
+
+  Current GraphBuilder state:
+  - Has model_manager, stats_extractor, feature_tokenizer
+  - table_to_graph() creates node features and adds nodes to 
+  graph
+  - Missing: method to add edges with semantic labels
+
+  What GraphBuilder needs to do:
+  1. Create nodes for each column with embedded features
+  2. Generate relationships between columns using 
+  RelationshipGenerator + SemanticLabelGenerator  
+
+  3. Resolve edge embedding challenges by integrating 
+  semantic label processing
+  4. Ensure seamless translation between NetworkX graph and 
+  tensor representations
+
+  I'll focus on bridging the compatibility gaps between 
+  different components. The key is creating a unified 
+  approach that embeds both node and edge features while 
+  maintaining the semantic relationships between columns. 
+  This requires careful coordination of the model manager, 
+  relationship generator, and feature tokenizer to create a 
+  comprehensive graph representation.
+
+  The workflow involves transforming tabular data into a 
+  graph structure with rich, embedded semantic information, 
+  preparing it for advanced graph neural network processing.
+
+✻ Thinking…
+
+  Let me analyze each class's current state and their 
+  interfaces:
+
+  Current Class Analysis:
+
+  ColumnStatsExtractor
+
+  - Input: df, col (single column)
+  - Output: Nested dict {f"column_name {col}": 
+  {"column_name": f" {col}", "column_data_type": f" 
+  {str(series.dtype)}", ...}}
+  - Batch method: get_batch_stats(df) returns {col: 
+  stats_dict}
+  - Status: Complete and working
+
+  RelationshipGenerator
+
+  - Constructor: Needs model_manager 
+  - Key method: compute_labeled_relationships(df, 
+  label_generator)
+  - Output: List of dicts with {'col1': col1, 'col2': col2, 
+  'feature_label': label, 'semantic_meaning': meaning, 
+  'auxiliary_features': aux}
+  - Status: Complete but needs SemanticLabelGenerator 
+  instance
+
+  SemanticLabelGenerator
+
+  - Constructor: No dependencies
+  - Key method: generate_feature_label(edge_features) 
+  - Output: String like "HIGH_COS_LOW_JAC_NUM"
+  - Status: Complete (after fixing method name bug)
+
+  FeatureTokenizer
+
+  - Constructor: Needs model_manager
+  - Key method: batch_tokenize_columns(df, stats_extractor) 
+  - Output: Tensor of shape [num_columns, seq_len, 
+  embedding_dim]
+  - Status: Complete for node features, but missing edge 
+  feature embedding
+
+  Current GraphBuilder
+
+  - Constructor: Takes model_manager, stats_extractor, 
+  feature_tokenizer
+  - Current method: table_to_graph(df) - creates nodes only
+  - Missing: Edge creation, semantic labeling, GNN data 
+  preparation
+
+  Compatibility Issues Identified:
+
+  I see critical integration challenges across components. 
+  The primary bottleneck is coordinating different modules' 
+  capabilities. RelationshipGenerator lacks a 
+  SemanticLabelGenerator, while FeatureTokenizer struggles 
+  with edge feature embedding. GraphBuilder needs 
+  comprehensive redesign to handle semantic relationships and
+   convert NetworkX graph to GNN-compatible tensor 
+  representations. Model manager dependencies create 
+  additional complexity, requiring careful orchestration of 
+  component interactions.
+
+⏺ Current Class State Analysis:
+
+  ColumnStatsExtractor ✅ Complete
+
+  - Interface: get_col_stats(df, col) → nested dict
+  - Batch: get_batch_stats(df) → {col: stats_dict}
+  - Output Format: {f"column_name {col}": {"column_name":
+   f" {col}", "column_data_type": "...", ...}}
+
+  RelationshipGenerator ✅ Complete
+
+  - Dependencies: Requires model_manager in constructor
+  - Key Method: compute_labeled_relationships(df, 
+  label_generator)
+  - Output: List of relationship dicts with
+  feature_label, semantic_meaning, auxiliary_features
+
+  SemanticLabelGenerator ⚠️ Nearly Complete
+
+  - Dependencies: None
+  - Key Method: generate_feature_label(edge_features) →
+  "HIGH_COS_LOW_JAC_NUM"
+  - Issue: Method name bug (line 327) needs fixing
+
+  FeatureTokenizer 🚧 Incomplete for GraphBuilder needs
+
+  - Current: Only handles node feature embedding via
+  batch_tokenize_columns()
+  - Missing: Edge label embedding for GNN processing
+  - Output: [num_columns, seq_len, embedding_dim] tensor
+
+  Current GraphBuilder 🚧 Partially Implemented
+
+  - Has: Node creation with embedded features
+  - Missing: Edge creation, semantic labeling, GNN data
+  preparation
+
+  Compatibility Issues & Solutions:
+
+  Issue 1: RelationshipGenerator Dependency
+
+  GraphBuilder needs RelationshipGenerator but doesn't
+  have one.
+  # Current constructor:
+  def __init__(self, model_manager, stats_extractor, 
+  feature_tokenizer):
+
+  # Solution: Add relationship_generator parameter or 
+  create internally:
+  def __init__(self, model_manager, stats_extractor, 
+  feature_tokenizer, relationship_generator=None):
+      self.relationship_generator =
+  relationship_generator or
+  RelationshipGenerator(model_manager)
+
+  Issue 2: FeatureTokenizer Gap
+
+  FeatureTokenizer cannot embed semantic labels for
+  edges.
+  # Need to extend FeatureTokenizer:
+  def tokenize_semantic_label(self, label_string):
+      """Convert semantic label to embedding for edge 
+  features"""
+
+  def batch_tokenize_relationships(self, relationships):
+      """Embed all semantic labels in relationship 
+  list"""
+
+  Issue 3: Data Flow Coordination
+
+  Need to bridge NetworkX graph ↔ GNN tensor
+  requirements.
+
+  Comprehensive GraphBuilder Design:
+
+  class GraphBuilder:
+      def __init__(self, model_manager, stats_extractor, 
+  feature_tokenizer, relationship_generator=None):
+          self.model_manager = model_manager
+          self.stats_extractor = stats_extractor
+          self.feature_tokenizer = feature_tokenizer
+          self.relationship_generator =
+  relationship_generator or
+  RelationshipGenerator(model_manager)
+          self.semantic_label_generator =
+  SemanticLabelGenerator()
+          self.graph = nx.Graph()
+
+      def build_complete_graph(self, df):
+          """Main method: Create complete graph with 
+  nodes and semantic edges"""
+          # Step 1: Create nodes with embedded stats
+          self.graph, node_features =
+  self.create_column_nodes(df)
+
+          # Step 2: Generate semantic relationships  
+          relationships = self.relationship_generator.com
+  pute_labeled_relationships(
+              df, self.semantic_label_generator
+          )
+
+          # Step 3: Add edges with embedded labels
+          edge_features =
+  self.add_semantic_edges(relationships)
+
+          # Step 4: Prepare for GNN
+          graph_data =
+  self.prepare_for_gnn(node_features, edge_features)
+
+          return self.graph, graph_data
+
+      def create_column_nodes(self, df):
+          """Create nodes with embedded column 
+  statistics"""
+          # Current implementation is good - just clean 
+  up
+
+      def add_semantic_edges(self, relationships):
+          """Add edges with semantic labels to graph and 
+  return embedded labels"""
+          edge_features = []
+
+          for rel in relationships:
+              # Add edge to NetworkX graph
+              self.graph.add_edge(
+                  f"col_{rel['col1']}",
+                  f"col_{rel['col2']}",
+                  feature_label=rel['feature_label'],
+
+  semantic_meaning=rel['semantic_meaning'],
+
+  auxiliary_features=rel['auxiliary_features']
+              )
+
+              # Collect for embedding
+              edge_features.append(rel['feature_label'])
+
+          # Embed semantic labels for GNN
+          return self.feature_tokenizer.batch_tokenize_se
+  mantic_labels(edge_features)
+
+      def prepare_for_gnn(self, node_features, 
+  edge_features):
+          """Convert NetworkX graph to PyTorch Geometric 
+  format"""
+          # Create edge_index tensor from graph structure
+          # Combine node and edge features appropriately
+          # Return Data object ready for GNN
+
+      def get_graph_summary(self):
+          """Return summary statistics of the built 
+  graph"""
+          return {
+              'num_nodes': self.graph.number_of_nodes(),
+              'num_edges': self.graph.number_of_edges(),
+              'semantic_labels': [data['feature_label']
+  for _, _, data in self.graph.edges(data=True)],
+              'label_distribution':
+  self._get_label_distribution()
+          }
+
+  Required FeatureTokenizer Extensions:
+
+  # Add to FeatureTokenizer class:
+  def tokenize_semantic_label(self, label_string):
+      """Convert single semantic label to embedding"""
+      text = f"relationship_type: {label_string}"
+      tokens = self._tokenize_text(text)
+      return self._create_embeddings(tokens)
+
+  def batch_tokenize_semantic_labels(self, label_list):
+      """Convert list of semantic labels to padded 
+  tensor"""
+      if not label_list:
+          return torch.empty(0)
+
+      label_embeddings = []
+      for label in label_list:
+          embedding = self.tokenize_semantic_label(label)
+          label_embeddings.append(embedding)
+
+      return self._pad_feature_list(label_embeddings)
+
+  Workflow Integration:
+
+  1. Node Creation: ColumnStatsExtractor →
+  FeatureTokenizer → NetworkX nodes
+  2. Edge Creation: RelationshipGenerator +
+  SemanticLabelGenerator → semantic labels
+  3. Edge Embedding:
+  FeatureTokenizer.batch_tokenize_semantic_labels → edge
+  tensors
+  4. GNN Preparation: NetworkX → PyTorch Geometric Data
+  object
+
+  This design creates a complete graph with both
+  statistical node features and semantic edge labels,
+  ready for GNN training on relationship prediction
+  tasks.
+
+✻ Thinking…
+
+  The user asked me to look at the current state of the 
+  classes and outline a proper implementation of 
+  GraphBuilder, looking for incompatibility issues. I've 
+  analyzed all the classes and identified several key 
+  compatibility issues and design requirements.
+
+  The main issues are:
+  1. GraphBuilder needs RelationshipGenerator but doesn't 
+  have one
+  2. FeatureTokenizer can only embed node features, not edge 
+  labels  
+  3. Need to coordinate NetworkX graph with GNN tensor 
+  requirements
+  4. Data flow between classes needs better integration
+
+  I've proposed a comprehensive solution that addresses these
+   issues by:
+  1. Adding RelationshipGenerator as dependency to 
+  GraphBuilder
+  2. Extending FeatureTokenizer to handle semantic label 
+  embedding
+  3. Creating a complete workflow from stats → relationships 
+  → graph → GNN data
+  4. Providing proper integration methods
+
+  The design follows the semantic framework approach where 
+  the GNN will train on predicting feature labels like 
+  "HIGH_COS_LOW_JAC_NUM" which map to semantic meanings 
+  through the ontology dictionary.
+
+  This should give the user a clear roadmap for implementing 
+  the complete GraphBuilder class that integrates all the 
+  existing components properly.
+
+> okay, i have multiple questions now, but we will approach
+   them one by one. remember, the active codebase is 
+  @table2graph_rewrite.py and the context lies within @"A 
+  Framework for GNN-Driven Tabular Data Interpreta" , our 
+  current conversation context lies in @classexport.txt 
+  other than what is actively availble to you as chat 
+  context. Now, for the first question:\
+  \
+  1. Consider my current approach, I now want to train the 
+  GNN to predict labels for which I will maintain a 
+  semantic ontology dict. These labels are computed using 
+  the class SemanticLabelGenerator. This only takes into 
+  account the edge features that have been created and the 
+  column features sort of just exist around, the labels to 
+  predict will be calculated based on only the edge 
+  features, so now what I want to do is instead of 
+  calculating so many column features, I only want to 
+  calculate a few, and instead I want to take the column 
+  header along with say 12  cells in each columns and 
+  tokenize them instead. this would teach the GNN about how
+   columns actually look instead of just learning about 
+  them using stats as a proxy. First, I want you to comment
+   about this approach, and then provide me a detailed 
+  implementation of this.
+  ⎿  Read table2graph_rewrite.py (508 lines)
+  ⎿  Read classexport.txt (1732 lines)
+
+⏺ Analysis of Your Proposed Approach
+
+  Strengths of Column Content Tokenization:
+
+  1. Direct Data Representation: Raw column values +
+  headers provide more authentic understanding of column
+  semantics than statistical proxies
+  2. Context-Rich Learning: 12 sample cells give GNN
+  insight into actual data patterns, formats, and
+  distributions
+  3. Semantic Understanding: Column headers + content
+  help GNN learn conceptual relationships (e.g.,
+  "customer_id" with values like "CUST_001" vs
+  "Total_Bill" with "$45.67")
+  4. Reduced Feature Engineering: Less dependency on
+  hand-crafted statistical features
+  5. Emergent Pattern Recognition: GNN can discover
+  patterns in data that stats might miss
+
+  Potential Concerns:
+
+  1. Sample Representativeness: 12 cells might not
+  capture full column diversity (especially for
+  high-cardinality columns)
+  2. Privacy/Sensitivity: Raw data exposure vs.
+  aggregated stats
+  3. Embedding Complexity: Variable-length content may
+  require more sophisticated padding
+  4. Computational Cost: Tokenizing raw content vs.
+  computing stats
+
+  Overall Assessment:
+
+  Excellent approach - aligns perfectly with the
+  framework's goal of emergent semantic understanding.
+  Raw content provides richer signal for the GNN to learn
+   genuine data relationships.
+
+  Detailed Implementation
+
+  Enhanced ColumnContentTokenizer Class:
+
+  class ColumnContentTokenizer:
+      """
+      Tokenize column headers and sample content for rich
+   semantic representation.
+      Replaces statistical feature extraction with direct
+   content embedding.
+      """
+
+      def __init__(self, model_manager, sample_size=12, 
+  sampling_strategy='balanced'):
+          self.model_manager = model_manager
+          self.model = model_manager.model
+          self.tokenizer = model_manager.tokenizer
+          self.device = model_manager.device
+          self.sample_size = sample_size
+          self.sampling_strategy = sampling_strategy
+          self.separator = " || "
+          self.content_template = "Column: {header} || 
+  Content: {content}"
+
+      def extract_column_content(self, df, col):
+          """
+          Extract column header and representative sample
+   content
+          
+          Args:
+              df (pd.DataFrame): DataFrame
+              col (str): Column name
+              
+          Returns:
+              dict: Column content information
+          """
+          series = df[col]
+
+          # Sample selection based on strategy
+          if self.sampling_strategy == 'balanced':
+              sample_values =
+  self._balanced_sample(series)
+          elif self.sampling_strategy == 'random':
+              sample_values = self._random_sample(series)
+          elif self.sampling_strategy ==
+  'representative':
+              sample_values =
+  self._representative_sample(series)
+          else:
+              sample_values =
+  self._balanced_sample(series)
+
+          return {
+              'header': col,
+              'sample_content': sample_values,
+              'dtype': str(series.dtype),
+              'unique_count': series.nunique(),
+              'null_count': series.isnull().sum()
+          }
+
+      def _balanced_sample(self, series):
+          """
+          Balanced sampling: mix of frequent and rare 
+  values
+          """
+          # Get non-null values
+          clean_series = series.dropna()
+
+          if len(clean_series) == 0:
+              return ["<NULL>"] * self.sample_size
+
+          if len(clean_series) <= self.sample_size:
+              return clean_series.tolist()
+
+          # Take mix of most common and random values
+          value_counts = clean_series.value_counts()
+
+          # Top frequent values (50% of sample)
+          top_n = min(self.sample_size // 2,
+  len(value_counts))
+          frequent_values =
+  value_counts.head(top_n).index.tolist()
+
+          # Random values from remaining (50% of sample)
+          remaining_values =
+  clean_series[~clean_series.isin(frequent_values)]
+          random_n = self.sample_size -
+  len(frequent_values)
+
+          if len(remaining_values) > 0:
+              random_values = remaining_values.sample(
+                  min(random_n, len(remaining_values)),
+                  random_state=42
+              ).tolist()
+          else:
+              random_values = []
+
+          # Combine and pad if necessary
+          sample = frequent_values + random_values
+
+          # Pad with most common value if needed
+          while len(sample) < self.sample_size:
+              sample.append(value_counts.index[0])
+
+          return sample[:self.sample_size]
+
+      def _random_sample(self, series):
+          """Pure random sampling"""
+          clean_series = series.dropna()
+          if len(clean_series) == 0:
+              return ["<NULL>"] * self.sample_size
+
+          if len(clean_series) <= self.sample_size:
+              return clean_series.tolist()
+
+          return clean_series.sample(self.sample_size,
+  random_state=42).tolist()
+
+      def _representative_sample(self, series):
+          """
+          Representative sampling: include nulls, 
+  extremes, and common values
+          """
+          sample = []
+          clean_series = series.dropna()
+
+          # Include null representation if nulls exist
+          if series.isnull().any():
+              sample.append("<NULL>")
+
+          if len(clean_series) == 0:
+              return ["<NULL>"] * self.sample_size
+
+          # For numeric data: include min, max, median
+          if pd.api.types.is_numeric_dtype(series):
+              sample.extend([
+                  clean_series.min(),
+                  clean_series.max(),
+                  clean_series.median()
+              ])
+
+          # Fill remaining with frequent values
+          value_counts = clean_series.value_counts()
+          remaining_slots = self.sample_size -
+  len(sample)
+
+          for value in
+  value_counts.head(remaining_slots).index:
+              sample.append(value)
+
+          # Pad if necessary
+          while len(sample) < self.sample_size:
+              sample.append(value_counts.index[0] if
+  len(value_counts) > 0 else "<EMPTY>")
+
+          return sample[:self.sample_size]
+
+      def content_to_text(self, content_dict):
+          """
+          Convert column content to formatted text for 
+  tokenization
+          
+          Args:
+              content_dict (dict): Output from 
+  extract_column_content
+              
+          Returns:
+              str: Formatted text for tokenization
+          """
+          header = content_dict['header']
+
+          # Format content values
+          content_parts = []
+          for value in content_dict['sample_content']:
+              # Convert to string and handle special 
+  cases
+              if pd.isna(value):
+                  content_parts.append("<NULL>")
+              elif isinstance(value, (int, float)):
+                  content_parts.append(str(value))
+              else:
+                  # Truncate long strings and clean
+                  clean_value = str(value).strip()[:50]
+  # Limit length
+                  content_parts.append(clean_value)
+
+          content_text = " | ".join(content_parts)
+
+          return self.content_template.format(
+              header=header,
+              content=content_text
+          )
+
+      def tokenize_column_content(self, df, col):
+          """
+          Main method: Extract and tokenize column 
+  content
+          
+          Args:
+              df (pd.DataFrame): DataFrame
+              col (str): Column name
+              
+          Returns:
+              torch.Tensor: Embeddings for column content
+          """
+          # Extract content
+          content_dict = self.extract_column_content(df,
+  col)
+
+          # Convert to text
+          content_text =
+  self.content_to_text(content_dict)
+
+          # Tokenize
+          tokens = self.tokenizer(
+              content_text,
+              padding=True,
+              truncation=True,
+              max_length=512,  # Adjust based on your 
+  model
+              return_tensors='pt'
+          )
+
+          # Move to device
+          tokens = {k: v.to(self.device) for k, v in
+  tokens.items()}
+
+          # Create embeddings
+          with torch.no_grad():
+              embeddings =
+  self.model.get_input_embeddings()(tokens['input_ids'])
+
+          return embeddings
+
+      def batch_tokenize_columns(self, df):
+          """
+          Tokenize all columns in DataFrame
+          
+          Args:
+              df (pd.DataFrame): Input DataFrame
+              
+          Returns:
+              torch.Tensor: Padded embeddings for all 
+  columns
+          """
+          column_embeddings = []
+
+          for col in df.columns:
+              embeddings =
+  self.tokenize_column_content(df, col)
+              column_embeddings.append(embeddings)
+
+          return self._pad_embeddings(column_embeddings)
+
+      def _pad_embeddings(self, embedding_list):
+          """Pad embeddings to same sequence length"""
+          if not embedding_list:
+              return torch.empty(0)
+
+          # Find max sequence length
+          max_length = max(emb.shape[1] for emb in
+  embedding_list)
+          embedding_dim =
+  self.model.get_input_embeddings().embedding_dim
+
+          padded_embeddings = []
+          for embeddings in embedding_list:
+              current_length = embeddings.shape[1]
+              if current_length < max_length:
+                  padding = torch.zeros(
+                      1, max_length - current_length,
+  embedding_dim,
+                      device=self.device
+                  )
+                  padded = torch.cat([embeddings,
+  padding], dim=1)
+              else:
+                  padded = embeddings
+
+              padded_embeddings.append(padded.squeeze(0))
+
+          return torch.stack(padded_embeddings)
+
+  Integration with GraphBuilder:
+
+  # Update GraphBuilder constructor:
+  def __init__(self, model_manager, 
+  relationship_generator=None):
+      self.model_manager = model_manager
+      self.column_content_tokenizer =
+  ColumnContentTokenizer(model_manager)
+      self.relationship_generator =
+  relationship_generator or
+  RelationshipGenerator(model_manager)
+      self.semantic_label_generator =
+  SemanticLabelGenerator()
+      self.graph = nx.Graph()
+
+  # Update create_column_nodes method:
+  def create_column_nodes(self, df):
+      """Create nodes with content-based embeddings 
+  instead of stats"""
+      self.graph.clear()
+
+      # Get content-based embeddings
+      node_features = self.column_content_tokenizer.batch
+  _tokenize_columns(df)
+
+      # Add nodes to graph
+      for idx, col in enumerate(df.columns):
+          self.graph.add_node(
+              f"col_{col}",
+              node_type="column",
+              column_name=col,
+              features=node_features[idx]
+          )
+
+      return self.graph, node_features
+
+⏺ This approach provides the GNN with authentic column
+  understanding through actual data content rather than
+  statistical summaries, enabling it to learn genuine
+  semantic relationships between columns based on their
+  real-world characteristics.
+
+> Okay, I have two questions here, one, do I need a new 
+  class for this and can this not be handled in the 
+  ColumnStatsExtractor class? second, the class you are 
+  suggesting has its own tokenizer, instead of using the 
+  FeatureTokenizer class, why is this?\
+  \
+  Remember, the code working takes precedence over 
+  aesthetic standards, if there is good reason to do things
+   this way, we can stick to it, but you need to justify 
+  your reasoning. think
+
+✻ Thinking…
+
+  The user is asking two important questions:
+
+  1. Do they need a new class for this, or can it be handled 
+  in the ColumnStatsExtractor class?
+  2. Why am I suggesting a new class with its own tokenizer 
+  instead of using the existing FeatureTokenizer class?
+
+  Let me think about this:
+
+  Question 1: New class vs. ColumnStatsExtractor
+
+  Looking at the current ColumnStatsExtractor:
+  - It extracts statistical information (mean, std, 
+  unique_count, etc.)
+  - It returns formatted text statistics in a specific nested
+   dict format
+  - Its purpose is to compute statistical summaries
+
+  The new approach I suggested:
+  - Extracts raw column content (header + sample values)
+  - Tokenizes this content directly
+  - Returns embeddings
+
+  These are fundamentally different purposes:
+  - ColumnStatsExtractor: Statistical analysis → text 
+  summaries
+  - Proposed approach: Content sampling → direct embedding
+
+  However, the user makes a valid point. We could modify 
+  ColumnStatsExtractor to handle both approaches, or even 
+  replace the statistical approach entirely with the content 
+  approach. The key question is: do we need both statistical 
+  summaries AND content sampling, or can content sampling 
+  replace statistical summaries entirely?
+
+  Given that:
+  1. The GNN training target is based on edge features 
+  (semantic labels from RelationshipGenerator)
+  2. Node features are just additional context for the GNN
+  3. Content sampling provides richer information than stats
+
+  It might make more sense to modify ColumnStatsExtractor to 
+  use the content approach instead of creating a new class.
+
+  Question 2: Why separate tokenizer vs. using 
+  FeatureTokenizer
+
+  Looking at the current FeatureTokenizer:
+  - It has methods like tokenize_column_stats(stats_dict) 
+  which expects the nested dict format from 
+  ColumnStatsExtractor
+  - It has _stats_to_text() which converts stats dict to text
+  - It has batch_tokenize_columns(df, stats_extractor) which 
+  calls ColumnStatsExtractor
+
+  The core challenge involves adapting existing components to
+   handle new content extraction methods. I'll focus on 
+  extending current functionality rather than creating 
+  separate classes. The goal is to integrate content sampling
+   seamlessly into the existing tokenization framework while 
+  maintaining flexibility for different feature extraction 
+  approaches.
+
+  Modifying the current architecture allows for:
+  - Minimal code changes
+  - Consistent processing pipeline
+  - Flexible feature extraction strategies
+
+  The implementation will require careful refactoring to 
+  support both statistical and content-based approaches 
+  without introducing unnecessary complexity.
+
+⏺ You're absolutely right to question this design. Let me
+   analyze the reasoning:
+
+  Question 1: New Class vs. ColumnStatsExtractor
+
+  You're correct - we don't need a new class. The
+  ColumnStatsExtractor can be modified to handle content
+  extraction instead of statistical extraction. Both
+  serve the same architectural purpose: extracting column
+   information for node features.
+
+  Current ColumnStatsExtractor purpose: Statistical
+  summariesProposed purpose: Content sampling + header
+  informationSame architectural role: Column-level
+  feature extraction
+
+  Question 2: Separate Tokenizer vs. FeatureTokenizer
+
+  You're also correct here - I was unnecessarily
+  duplicating tokenization logic. The FeatureTokenizer
+  already has the infrastructure for:
+  - Model management
+  - Device handling
+  - Tokenization
+  - Embedding creation
+  - Padding
+
+  Better Approach: Modify Existing Classes
+
+  Enhanced ColumnStatsExtractor (Content-Based):
+
+  class ColumnStatsExtractor:
+      def __init__(self, sample_size=12, 
+  sampling_strategy='balanced'):
+          self.sample_size = sample_size
+          self.sampling_strategy = sampling_strategy
+          self.content_template = "Column: {header} || 
+  Content: {content}"
+
+      def get_col_stats(self, df, col):
+          """
+          Extract column content instead of statistical 
+  summaries
+          
+          Returns same nested dict format but with 
+  content information
+          """
+          series = df[col]
+          sample_values =
+  self._extract_sample_content(series)
+
+          # Format content for tokenization
+          content_text = self._format_content_text(col,
+  sample_values)
+
+          # Return in same format as before for 
+  compatibility
+          return {f"column_name {col}": {
+              "column_content": content_text,
+              "column_data_type": f" 
+  {str(series.dtype)}",
+              "unique_count": f" {len(series.unique())}",
+              "null_count": f" {series.isnull().sum()}"
+          }}
+
+      def _extract_sample_content(self, series):
+          """Extract representative sample from column"""
+          clean_series = series.dropna()
+
+          if len(clean_series) == 0:
+              return ["<NULL>"] * self.sample_size
+
+          if len(clean_series) <= self.sample_size:
+              return clean_series.tolist()
+
+          # Balanced sampling: mix frequent + random
+          value_counts = clean_series.value_counts()
+          top_n = min(self.sample_size // 2,
+  len(value_counts))
+          frequent_values =
+  value_counts.head(top_n).index.tolist()
+
+          remaining =
+  clean_series[~clean_series.isin(frequent_values)]
+          random_n = self.sample_size -
+  len(frequent_values)
+
+          if len(remaining) > 0:
+              random_values = remaining.sample(
+                  min(random_n, len(remaining)),
+                  random_state=42
+              ).tolist()
+          else:
+              random_values = []
+
+          sample = frequent_values + random_values
+
+          # Pad if needed
+          while len(sample) < self.sample_size:
+              sample.append(value_counts.index[0])
+
+          return sample[:self.sample_size]
+
+      def _format_content_text(self, col_name, 
+  sample_values):
+          """Format column header and content for 
+  tokenization"""
+          # Clean and format values
+          content_parts = []
+          for value in sample_values:
+              if pd.isna(value):
+                  content_parts.append("<NULL>")
+              else:
+                  clean_value = str(value).strip()[:50]
+  # Limit length
+                  content_parts.append(clean_value)
+
+          content_text = " | ".join(content_parts)
+
+          return self.content_template.format(
+              header=col_name,
+              content=content_text
+          )
+
+  Enhanced FeatureTokenizer (Handle New Format):
+
+  # Modify FeatureTokenizer._stats_to_text to handle 
+  content format:
+
+  def _stats_to_text(self, stats_dict):
+      """Convert stats dict to text - now handles content
+   format"""
+      inner_stats = list(stats_dict.values())[0]
+
+      # Check if this is content-based or stats-based
+      if "column_content" in inner_stats:
+          # New content-based format - use the 
+  pre-formatted content
+          return inner_stats["column_content"]
+      else:
+          # Legacy stats-based format - convert to text
+          text_parts = [f"{k}:{v}" for k, v in
+  inner_stats.items()]
+          return self.separator.join(text_parts)
+
+  Why This Approach is Better:
+
+  1. Maintains Architecture: Same class structure, just
+  different internal logic
+  2. Backward Compatible: FeatureTokenizer can handle
+  both formats
+  3. No Code Duplication: Reuses existing tokenization
+  infrastructure
+  4. Consistent Interface: get_col_stats() still returns
+  same format
+  5. Easy Migration: Just change what
+  ColumnStatsExtractor extracts
+
+  Justification for Content Over Stats:
+
+  - Richer Signal: Raw content provides more semantic
+  information
+  - Direct Learning: GNN learns from actual data
+  patterns, not statistical proxies
+  - Semantic Alignment: Headers + values teach genuine
+  column meaning
+  - Framework Compatibility: Supports emergent behavior
+  goal
+
+  The modified approach maintains your existing
+  architecture while shifting from statistical summaries
+  to content-based representation - giving the GNN
+  authentic column understanding without architectural
+  disruption.
+
+> Okay, so this would require a significant restructuring 
+  of the approach. Now, since the columns stats extractor 
+  which is preparing my graph nodes, only needs to prepare 
+  and tokenize the sample content, i would still want to 
+  use the column features that i am calculating. the more 
+  central point is that there is simply no need to create 
+  edge features anymore to store in the GNN, these feature 
+  calculations should only serve as a mapping to move from 
+  my column nodes to the index i want to map them to. so 
+  during training phase, i want to compute all of this, and
+   use them to create the graph and then map to an index, 
+  but during the test phase, i only would want to input the
+   column sample and would hope that the all the heavy 
+  feature calculations i was doing gets mapped using the 
+  GNN. so now, the relationship generator class should do 
+  most of the heavy lifting as it  ensures that these stats
+   i am calculating are mapping properly to my indices. 
+  Now, do a thorough evaluation of this approach, and also 
+  answer the following question -> is this simple GNN 
+  enough to capture the mapping where the map is me 
+  calculating the edge features -> creating the intervals 
+  -> mapping to index, or the transformation is too complex
+   to be effectively captured. finally, do a thorough 
+  analysis of the approach i am outlining and go through 
+  @table2graph_rewrite.py and provide me an implementation 
+  plan. think
+  ⎿  Read table2graph_rewrite.py (508 lines)
+
+✻ Thinking…
+
+  The user is proposing a significant shift in approach. Let 
+  me understand this carefully:
+
+  Current approach:
+  - ColumnStatsExtractor extracts statistical features from 
+  columns
+  - RelationshipGenerator computes edge features between 
+  columns
+  - SemanticLabelGenerator maps edge features to semantic 
+  labels
+  - Both node features (column stats) and edge features are 
+  used in GNN
+
+  Proposed approach:
+  - ColumnStatsExtractor extracts sample content + header for
+   tokenization (node features)
+  - RelationshipGenerator still computes edge features BUT 
+  these are only used for training labels, not as GNN input
+  - During training: Compute edge features → intervals → 
+  semantic labels → GNN learns to predict labels from node 
+  content alone
+  - During testing: Only input column content → GNN predicts 
+  semantic labels directly → no need to compute expensive 
+  edge features
+
+  So the fundamental shift is:
+  - Training: Node features (content) + Edge labels (computed
+   from expensive features) → GNN learns mapping
+  - Testing: Node features (content) only → GNN predicts edge
+   labels
+
+  This is essentially asking the GNN to learn the complex 
+  relationship computation (cosine similarity, jaccard, etc.)
+   from just looking at column content.
+
+  Key questions:
+  1. Can a GNN learn to replicate the complex edge feature 
+  calculations just from column content?
+  2. Is this transformation too complex?
+  3. Implementation plan for this approach
+
+  Let me think through this:
+
+  The mapping they want to learn is:
+  Column Content A + Column Content B → Edge Feature 
+  Calculations → Intervals → Semantic Label
+
+  But they want the GNN to learn:
+  Column Content A + Column Content B → Semantic Label 
+  (directly)
+
+  This is actually a very interesting approach. The GNN would
+   need to learn:
+  1. Cosine similarity between column values 
+  (numerical/categorical)
+  2. Jaccard overlap between unique values
+  3. Data type similarity
+  4. How these combine to create semantic relationships
+
+  Can a GNN do this? Let's think:
+  - GNNs are good at learning complex patterns from data
+
+  - They can learn non-linear transformations
+  - But this requires understanding intricate statistical 
+  relationships
+
+  The approach has potential advantages:
+  - Raw column content inherently contains the information 
+  behind edge features
+  - A sophisticated GNN might capture complex statistical 
+  patterns
+  - Semantic labels provide strong training guidance
+
+  Potential challenges emerge:
+  - Limited sample size (12 cells) may restrict learning deep
+   relationships
+  - Risk of overfitting to specific content rather than 
+  generalizing
+  - Replicating mathematical operations from minimal data 
+  seems difficult
+
+  The success depends on carefully designing the GNN 
+  architecture to extract nuanced statistical insights from 
+  minimal column content.
+
+✻ Thinking…
+
+  This is a really interesting approach. Let me break down 
+  what the user is proposing:
+
+  Training Phase:
+  1. Extract column content (header + 12 sample cells) → Node
+   features via tokenization
+  2. Compute expensive edge features (cosine similarity, 
+  jaccard, etc.) → Map to intervals → Semantic labels
+  3. Train GNN: Input = Node features only, Target = Semantic
+   labels
+  4. GNN learns: Column Content A + Column Content B → 
+  Semantic Label
+
+  Testing Phase:
+  1. Extract column content → Node features 
+  2. GNN predicts semantic labels directly from node content
+  3. No expensive edge feature computation needed
+
+  Core Question: Can a GNN learn the complex mapping from raw
+   column content to semantic relationship labels that 
+  currently requires mathematical feature engineering?
+
+  Let me think through this systematically...
+
+  What the GNN needs to learn:
+  - From column content, infer cosine similarity between 
+  values
+  - From column content, infer jaccard overlap  
+  - From column content, infer data type compatibility
+  - Combine these into discretized intervals
+  - Map intervals to semantic labels
+
+  Challenges:
+  1. Statistical Learning from Samples: Learning cosine 
+  similarity from 12 samples is challenging
+  2. Mathematical Operations: GNNs need to learn 
+  cosine/jaccard calculations implicitly
+  3. Sample Representativeness: 12 cells may not capture full
+   column relationships
+  4. Generalization: Will it work on unseen data patterns?
+
+  Advantages:
+  1. Eliminates Feature Engineering: No expensive 
+  computations during inference
+  2. End-to-End Learning: GNN learns genuine semantic 
+  understanding
+  3. Scalability: Much faster inference
+  4. Generalization: Potentially better on new domains
+
+  Assessment: This is actually quite sophisticated and could 
+  work, but requires careful design.
+
+⏺ Thorough Evaluation of Your Proposed Approach
+
+  What You're Proposing:
+
+  Training: Column Content → [Expensive Edge Features →
+  Intervals → Labels] → GNN learns direct mapping
+  Testing:  Column Content → GNN → Semantic Labels (no
+  edge computation needed)
+
+  Core Challenge: Can GNN Learn Complex Mathematical 
+  Mappings?
+
+  The Transformation Complexity:
+  Your GNN needs to learn the equivalent of:
+  1. Cosine Similarity: Statistical correlation between
+  value distributions
+  2. Jaccard Index: Set overlap calculations
+  3. Data Type Logic: Categorical reasoning about dtypes
+  4. Interval Discretization: Threshold-based
+  categorization
+  5. Composite Scoring: Weighted combination of multiple
+  metrics
+
+  Assessment: FEASIBLE but with important caveats
+
+  Why This Could Work:
+
+  1. Rich Content Signal: Column headers + sample values
+  contain the raw information that edge features extract
+  2. Semantic Supervision: 18 distinct semantic labels
+  provide strong learning signal
+  3. Pattern Recognition: GNNs excel at learning complex
+  non-linear mappings
+  4. Implicit Learning: GNN can learn statistical
+  relationships without explicit calculation
+
+  Critical Success Factors:
+
+  1. Sample Representativeness: 12 cells must capture
+  column essence
+    - Risk: High-cardinality columns may not be
+  well-represented
+    - Mitigation: Intelligent sampling strategy (balanced
+   approach you mentioned)
+  2. Training Data Diversity: Need many table types for
+  generalization
+    - Risk: Overfitting to specific content patterns
+    - Mitigation: Diverse training corpus across domains
+  3. GNN Architecture Power: Must be sophisticated enough
+    - Risk: Simple GCN may not capture complex mappings
+    - Mitigation: Deeper networks, attention mechanisms
+
+  Specific Challenges:
+
+  1. Learning Cosine Similarity from Samples
+  - Challenge: Inferring full column correlation from 12
+  values
+  - Assessment: Moderate difficulty - patterns in sample
+  values can indicate relationships
+
+  2. Learning Jaccard from Content
+  - Challenge: Understanding set overlap from limited
+  samples
+  - Assessment: Easier - overlapping values in samples
+  directly indicate Jaccard similarity
+
+  3. Learning Statistical Discretization
+  - Challenge: Learning threshold-based interval mapping
+  - Assessment: Difficult - requires learning precise
+  numerical boundaries
+
+  Implementation Plan Analysis
+
+  Current Code Assessment:
+
+  ✅ Ready Components:
+  - SemanticLabelGenerator (interval → label mapping)
+  - RelationshipGenerator (edge feature computation)
+  - FeatureTokenizer (content embedding)
+
+  🔄 Needs Modification:
+  - ColumnStatsExtractor → ColumnContentExtractor
+  - GraphBuilder → Training/Testing mode split
+  - New training pipeline for content→label mapping
+
+  Detailed Implementation Plan:
+
+  Phase 1: Modify ColumnStatsExtractor
+
+  class ColumnStatsExtractor:
+      def __init__(self, sample_size=12, 
+  sampling_strategy='balanced'):
+          self.sample_size = sample_size
+          self.sampling_strategy = sampling_strategy
+
+      def get_col_content(self, df, col):
+          """Extract column content for node features"""
+          series = df[col]
+          sample_values = self._balanced_sample(series)
+
+          return {f"column_name {col}": {
+              "column_header": col,
+              "sample_content": " | ".join([str(v) for v
+  in sample_values]),
+              "dtype_info": str(series.dtype)
+          }}
+
+      def _balanced_sample(self, series):
+          # Your balanced sampling logic here
+          pass
+
+  Phase 2: Create Training/Testing Pipeline
+
+  class GraphBuilder:
+      def __init__(self, model_manager, 
+  training_mode=True):
+          self.training_mode = training_mode
+          # ... existing initialization
+
+      def build_training_graph(self, df):
+          """Training: Content + computed labels"""
+          # 1. Extract content for nodes
+          node_features = self._create_content_nodes(df)
+
+          # 2. Compute expensive edge features → labels  
+          relationships = self.relationship_generator.com
+  pute_labeled_relationships(
+              df, self.semantic_label_generator
+          )
+
+          # 3. Create graph with content nodes + semantic
+   edge labels
+          return
+  self._create_training_graph(node_features,
+  relationships)
+
+      def build_inference_graph(self, df):
+          """Testing: Content only, GNN predicts 
+  labels"""
+          # Only extract content - no edge computation
+          node_features = self._create_content_nodes(df)
+          return
+  self._create_inference_graph(node_features)
+
+  Phase 3: GNN Architecture Considerations
+
+  # Your GNN needs to learn content → label mapping
+  # Architecture suggestions:
+
+  class ContentToLabelGNN(torch.nn.Module):
+      def __init__(self, input_dim, hidden_dim, 
+  num_labels=18):
+          super().__init__()
+          # Deeper network for complex mapping
+          self.node_encoder = torch.nn.Linear(input_dim,
+  hidden_dim)
+          self.gnn_layers = torch.nn.ModuleList([
+              GCNConv(hidden_dim, hidden_dim) for _ in
+  range(3)  # Deeper network
+          ])
+          self.edge_classifier =
+  torch.nn.Linear(hidden_dim * 2, num_labels)
+
+      def forward(self, x, edge_index):
+          # Learn node representations from content
+          for layer in self.gnn_layers:
+              x = F.relu(layer(x, edge_index))
+
+          # For each potential edge, classify 
+  relationship
+          edge_features =
+  self._compute_edge_representations(x, potential_edges)
+          edge_labels =
+  self.edge_classifier(edge_features)
+          return edge_labels
+
+  Phase 4: Training Strategy
+
+  def train_content_to_label_mapping():
+      """
+      Training loop:
+      1. Load diverse tables
+      2. Extract content features 
+      3. Compute ground truth labels via edge features
+      4. Train GNN to predict labels from content alone
+      """
+      for batch in data_loader:
+          # Content features only
+          node_features = extract_column_content(batch)
+
+          # Ground truth labels (computed via expensive 
+  features)
+          true_labels =
+  compute_semantic_labels_via_features(batch)
+
+          # Train GNN mapping
+          predicted_labels = gnn(node_features)
+          loss = criterion(predicted_labels, true_labels)
+          loss.backward()
+
+  Risk Assessment & Mitigations:
+
+  High Risk: Sample size limitation
+  - Mitigation: Adaptive sampling based on column
+  characteristics
+
+  Medium Risk: Mathematical operation learning
+  - Mitigation: Curriculum learning, auxiliary losses
+
+  Low Risk: Computational efficiency
+  - Benefit: Major speedup during inference
+
+  Final Recommendation:
+
+  This is a sophisticated and promising approach that
+  aligns with modern end-to-end learning paradigms. The
+  key is:
+
+  1. Start Simple: Test on known table types first
+  2. Gradual Complexity: Begin with obvious relationships
+   (identical columns, clear numerical correlations)
+  3. Rich Training Data: Diverse table corpus for robust
+  learning
+  4. Monitoring: Compare GNN predictions with ground
+  truth edge features during development
+
+  The approach is feasible and could lead to more
+  generalizable relationship detection than hand-crafted
+  features, but requires careful implementation and
+  extensive validation.
+
+✻ Thinking…
+
+  The user asked for a thorough evaluation and I provided it.
+   I assessed:
+
+  1. Feasibility: Yes, but with important caveats
+  2. Complexity: The GNN needs to learn complex mathematical 
+  operations, but it's possible
+  3. Implementation Plan: Detailed breakdown of what needs to
+   change
+  4. Risk Assessment: High/medium/low risks with mitigations
+
+  Key points I made:
+  - The approach is sophisticated and promising
+  - Main challenge is learning statistical operations from 
+  limited samples
+  - Success depends on training data diversity and GNN 
+  architecture
+  - Provides major computational benefits during inference
+  - Aligns with end-to-end learning paradigms
+
+  I think I covered all the aspects they asked for:
+  - Thorough evaluation ✓
+  - Assessment of GNN capability for complex mapping ✓  
+  - Analysis of the approach ✓
+  - Review of current code ✓
+  - Implementation plan ✓
+
+  The user should have a good understanding now of whether 
+  this approach is viable and how to implement it.
+
+> Okay, since inference time compute is significantly 
+  reduced, let us do one thing, let us increase the number 
+  of cells we include in our sampled column. now, taking 
+  this into account, present to me a complete rewrite of 
+  all the classes that need to be rewritten, beginning with
+   ColumnStatsExtractor.
+
+⏺ Complete Class Rewrite for Content-Based Approach
+
+  1. ColumnStatsExtractor → ColumnContentExtractor
+
+  class ColumnContentExtractor:
+      """
+      Extract rich column content for node features 
+  instead of statistical summaries.
+      Samples more cells since inference compute is 
+  reduced.
+      """
+
+      def __init__(self, sample_size=50, 
+  sampling_strategy='comprehensive'):
+          self.sample_size = sample_size  # Increased 
+  from 12 to 50
+          self.sampling_strategy = sampling_strategy
+          self.content_template = "Column: {header} || 
+  DataType: {dtype} || Content: {content}"
+
+      def get_col_stats(self, df, col):
+          """
+          Extract column content in same dict format as 
+  before for compatibility
+          
+          Args:
+              df (pd.DataFrame): DataFrame
+              col (str): Column name
+              
+          Returns:
+              dict: Column content in nested dict format
+          """
+          series = df[col]
+          sample_content =
+  self._extract_comprehensive_sample(series)
+          formatted_content =
+  self._format_content_for_tokenization(col, series,
+  sample_content)
+
+          # Return in same nested format for 
+  FeatureTokenizer compatibility
+          return {f"column_name {col}": {
+              "column_content": formatted_content,
+              "column_header": col,
+              "sample_size": str(len(sample_content)),
+              "data_type": str(series.dtype)
+          }}
+
+      def _extract_comprehensive_sample(self, series):
+          """
+          Extract comprehensive sample using multiple 
+  strategies
+          """
+          if self.sampling_strategy == 'comprehensive':
+              return self._comprehensive_sample(series)
+          elif self.sampling_strategy == 'balanced':
+              return self._balanced_sample(series)
+          elif self.sampling_strategy ==
+  'representative':
+              return self._representative_sample(series)
+          else:
+              return self._comprehensive_sample(series)
+
+      def _comprehensive_sample(self, series):
+          """
+          Comprehensive sampling: nulls + extremes + 
+  frequent + random + patterns
+          """
+          sample = []
+          clean_series = series.dropna()
+
+          # 1. Include null representation if exists (1-2
+   slots)
+          if series.isnull().any():
+              null_count = min(2, self.sample_size // 10)
+              sample.extend(["<NULL>"] * null_count)
+
+          if len(clean_series) == 0:
+              return ["<NULL>"] * self.sample_size
+
+          # 2. For numeric: include statistical extremes 
+  (3-5 slots)
+          if pd.api.types.is_numeric_dtype(series):
+              extremes = [
+                  clean_series.min(),
+                  clean_series.max(),
+                  clean_series.median()
+              ]
+              # Add quartiles if we have space
+              if self.sample_size >= 40:
+                  extremes.extend([
+                      clean_series.quantile(0.25),
+                      clean_series.quantile(0.75)
+                  ])
+              sample.extend(extremes)
+
+          # 3. Most frequent values (30% of remaining 
+  slots)
+          remaining_slots = self.sample_size -
+  len(sample)
+          frequent_slots = max(1, int(remaining_slots *
+  0.3))
+
+          value_counts = clean_series.value_counts()
+          frequent_values =
+  value_counts.head(frequent_slots).index.tolist()
+          sample.extend(frequent_values)
+
+          # 4. Random sample from non-frequent values 
+  (50% of remaining slots)
+          remaining_slots = self.sample_size -
+  len(sample)
+          random_slots = max(1, int(remaining_slots *
+  0.5))
+
+          non_frequent =
+  clean_series[~clean_series.isin(frequent_values)]
+          if len(non_frequent) > 0:
+              random_sample_size = min(random_slots,
+  len(non_frequent))
+              random_values =
+  non_frequent.sample(random_sample_size,
+  random_state=42).tolist()
+              sample.extend(random_values)
+
+          # 5. Fill remaining slots with most common 
+  value
+          while len(sample) < self.sample_size:
+              if len(value_counts) > 0:
+                  sample.append(value_counts.index[0])
+              else:
+                  sample.append("<EMPTY>")
+
+          return sample[:self.sample_size]
+
+      def _balanced_sample(self, series):
+          """Balanced sampling between frequent and 
+  random"""
+          clean_series = series.dropna()
+
+          if len(clean_series) == 0:
+              return ["<NULL>"] * self.sample_size
+
+          if len(clean_series) <= self.sample_size:
+              result = clean_series.tolist()
+              # Pad with nulls if series has them
+              while len(result) < self.sample_size:
+                  if series.isnull().any():
+                      result.append("<NULL>")
+                  else:
+                      result.append(result[0] if result
+  else "<EMPTY>")
+              return result
+
+          # 50-50 split between frequent and random
+          half_size = self.sample_size // 2
+
+          value_counts = clean_series.value_counts()
+          frequent_values =
+  value_counts.head(half_size).index.tolist()
+
+          remaining =
+  clean_series[~clean_series.isin(frequent_values)]
+          if len(remaining) > 0:
+              random_values = remaining.sample(
+                  min(self.sample_size -
+  len(frequent_values), len(remaining)),
+                  random_state=42
+              ).tolist()
+          else:
+              random_values = []
+
+          sample = frequent_values + random_values
+
+          # Pad if needed
+          while len(sample) < self.sample_size:
+              sample.append(value_counts.index[0])
+
+          return sample[:self.sample_size]
+
+      def _representative_sample(self, series):
+          """Representative sample including edge cases 
+  and patterns"""
+          sample = []
+          clean_series = series.dropna()
+
+          # Always include null if present
+          if series.isnull().any():
+              sample.append("<NULL>")
+
+          if len(clean_series) == 0:
+              return ["<NULL>"] * self.sample_size
+
+          # For string columns: include different lengths
+   and patterns
+          if pd.api.types.is_string_dtype(series) or
+  series.dtype == 'object':
+              # Shortest and longest strings
+              string_lengths = clean_series.str.len()
+              if not string_lengths.empty:
+                  shortest_idx = string_lengths.idxmin()
+                  longest_idx = string_lengths.idxmax()
+
+  sample.extend([clean_series[shortest_idx],
+  clean_series[longest_idx]])
+
+          # For numeric: include distribution 
+  representatives
+          if pd.api.types.is_numeric_dtype(series):
+              sample.extend([
+                  clean_series.min(),
+                  clean_series.max(),
+                  clean_series.median(),
+                  clean_series.mean()
+              ])
+
+          # Fill remaining with value frequency 
+  distribution
+          value_counts = clean_series.value_counts()
+          remaining_slots = self.sample_size -
+  len(sample)
+
+          for value in
+  value_counts.head(remaining_slots).index:
+              sample.append(value)
+
+          # Final padding
+          while len(sample) < self.sample_size:
+              sample.append(value_counts.index[0] if
+  len(value_counts) > 0 else "<EMPTY>")
+
+          return sample[:self.sample_size]
+
+      def _format_content_for_tokenization(self, 
+  col_name, series, sample_content):
+          """
+          Format column information for tokenization
+          
+          Args:
+              col_name (str): Column name
+              series (pd.Series): Original series for 
+  metadata
+              sample_content (list): Sampled values
+              
+          Returns:
+              str: Formatted string for tokenization
+          """
+          # Clean and format sample values
+          formatted_values = []
+          for value in sample_content:
+              if pd.isna(value) or value == "<NULL>":
+                  formatted_values.append("<NULL>")
+              elif isinstance(value, (int, float)):
+                  formatted_values.append(str(value))
+              else:
+                  # Clean string values and limit length
+                  clean_value = str(value).strip()
+                  # Remove excessive whitespace and limit
+   length
+                  clean_value = ' 
+  '.join(clean_value.split())[:100]
+                  formatted_values.append(clean_value)
+
+          content_string = " | ".join(formatted_values)
+
+          return self.content_template.format(
+              header=col_name,
+              dtype=str(series.dtype),
+              content=content_string
+          )
+
+      def get_batch_stats(self, df, columns=None):
+          """
+          Extract content for multiple columns
+          
+          Args:
+              df (pd.DataFrame): DataFrame
+              columns (list): Column names (None for all 
+  columns)
+              
+          Returns:
+              dict: Content information for all columns
+          """
+          if columns is None:
+              columns = df.columns.tolist()
+
+          batch_content = {}
+          for col in columns:
+              batch_content[col] = self.get_col_stats(df,
+   col)
+
+          return batch_content
+
+  2. Enhanced FeatureTokenizer
+
+  class FeatureTokenizer:
+      """
+      Enhanced tokenizer to handle content-based node 
+  features and semantic edge labels
+      """
+
+      def __init__(self, model_manager, 
+  max_sequence_length=1024):
+          self.model_manager = model_manager
+          self.model = model_manager.model
+          self.tokenizer = model_manager.tokenizer
+          self.device = model_manager.device
+          self.max_sequence_length = max_sequence_length
+          self.separator = " || "
+
+      def tokenize_column_content(self, content_dict):
+          """
+          Tokenize column content (replaces 
+  tokenize_column_stats)
+          
+          Args:
+              content_dict (dict): Output from 
+  ColumnContentExtractor.get_col_stats()
+              
+          Returns:
+              torch.Tensor: Embeddings for column content
+          """
+          # Extract formatted content
+          inner_content = list(content_dict.values())[0]
+          content_text = inner_content["column_content"]
+
+          # Tokenize with increased max length for richer
+   content
+          tokens = self.tokenizer(
+              content_text,
+              padding=True,
+              truncation=True,
+              max_length=self.max_sequence_length,
+              return_tensors='pt'
+          )
+
+          # Move to device
+          tokens = {k: v.to(self.device) for k, v in
+  tokens.items()}
+
+          # Create embeddings
+          with torch.no_grad():
+              embeddings =
+  self.model.get_input_embeddings()(tokens['input_ids'])
+
+          return embeddings
+
+      def tokenize_semantic_label(self, label_string):
+          """
+          Tokenize semantic relationship labels for edge 
+  features
+          
+          Args:
+              label_string (str): Semantic label (e.g., 
+  "HIGH_COS_LOW_JAC_NUM")
+              
+          Returns:
+              torch.Tensor: Embeddings for semantic label
+          """
+          # Format label for better understanding
+          formatted_label = f"relationship_type: 
+  {label_string.replace('_', ' ').lower()}"
+
+          tokens = self.tokenizer(
+              formatted_label,
+              padding=True,
+              truncation=True,
+              max_length=128,  # Labels are shorter
+              return_tensors='pt'
+          )
+
+          tokens = {k: v.to(self.device) for k, v in
+  tokens.items()}
+
+          with torch.no_grad():
+              embeddings =
+  self.model.get_input_embeddings()(tokens['input_ids'])
+
+          return embeddings
+
+      def batch_tokenize_columns(self, df, 
+  content_extractor):
+          """
+          Tokenize content for all columns in DataFrame
+          
+          Args:
+              df (pd.DataFrame): Input DataFrame
+              content_extractor (ColumnContentExtractor):
+   Extractor instance
+              
+          Returns:
+              torch.Tensor: Padded embeddings for all 
+  columns
+          """
+          content_embeddings = []
+
+          for col in df.columns:
+              col_content =
+  content_extractor.get_col_stats(df, col)
+              embeddings =
+  self.tokenize_column_content(col_content)
+              content_embeddings.append(embeddings)
+
+          return
+  self._pad_feature_list(content_embeddings)
+
+      def batch_tokenize_semantic_labels(self, 
+  label_list):
+          """
+          Tokenize list of semantic labels for edge 
+  features
+          
+          Args:
+              label_list (list): List of semantic labels
+              
+          Returns:
+              torch.Tensor: Padded embeddings for all 
+  labels
+          """
+          if not label_list:
+              return torch.empty(0)
+
+          label_embeddings = []
+          for label in label_list:
+              embedding =
+  self.tokenize_semantic_label(label)
+              label_embeddings.append(embedding)
+
+          return self._pad_feature_list(label_embeddings)
+
+      def _pad_feature_list(self, feature_list):
+          """
+          Pad feature tensors to same length for batch 
+  processing
+          
+          Args:
+              feature_list (list): List of embedding 
+  tensors
+              
+          Returns:
+              torch.Tensor: Stacked and padded tensors
+          """
+          if not feature_list:
+              return torch.empty(0)
+
+          # Find maximum sequence length
+          max_length = max(features.shape[1] for features
+   in feature_list)
+          embedding_dim =
+  self.model.get_input_embeddings().embedding_dim
+
+          padded_features = []
+          for features in feature_list:
+              current_length = features.shape[1]
+              if current_length < max_length:
+                  padding = torch.zeros(
+                      1, max_length - current_length,
+  embedding_dim,
+                      device=self.device
+                  )
+                  padded = torch.cat([features, padding],
+   dim=1)
+              else:
+                  padded = features
+
+              padded_features.append(padded.squeeze(0))
+
+          return torch.stack(padded_features)
+
+      # Backward compatibility method
+      def tokenize_column_stats(self, stats_dict):
+          """Backward compatibility wrapper"""
+          return self.tokenize_column_content(stats_dict)
+
+  3. Enhanced GraphBuilder with Training/Inference Modes
+
+  class GraphBuilder:
+      """
+      Enhanced GraphBuilder supporting training and 
+  inference modes
+      """
+
+      def __init__(self, model_manager, 
+  content_extractor=None, feature_tokenizer=None, 
+                   relationship_generator=None, 
+  training_mode=True):
+          self.model_manager = model_manager
+          self.content_extractor = content_extractor or
+  ColumnContentExtractor()
+          self.feature_tokenizer = feature_tokenizer or
+  FeatureTokenizer(model_manager)
+          self.relationship_generator =
+  relationship_generator or
+  RelationshipGenerator(model_manager)
+          self.semantic_label_generator =
+  SemanticLabelGenerator()
+          self.training_mode = training_mode
+          self.graph = nx.Graph()
+
+      def build_complete_graph(self, df):
+          """
+          Main entry point - builds graph based on mode
+          
+          Args:
+              df (pd.DataFrame): Input DataFrame
+              
+          Returns:
+              tuple: (graph, graph_data)
+          """
+          if self.training_mode:
+              return self.build_training_graph(df)
+          else:
+              return self.build_inference_graph(df)
+
+      def build_training_graph(self, df):
+          """
+          Training mode: Content nodes + computed 
+  semantic edge labels
+          
+          Args:
+              df (pd.DataFrame): Input DataFrame
+              
+          Returns:
+              tuple: (graph, graph_data) with ground 
+  truth labels
+          """
+          # Step 1: Create content-based nodes
+          self.graph, node_features =
+  self.create_content_nodes(df)
+
+          # Step 2: Compute expensive edge features → 
+  semantic labels
+          relationships = self.relationship_generator.com
+  pute_labeled_relationships(
+              df, self.semantic_label_generator
+          )
+
+          # Step 3: Add edges with semantic labels 
+  (ground truth)
+          edge_features =
+  self.add_semantic_edges(relationships)
+
+          # Step 4: Prepare training data
+          graph_data =
+  self.prepare_training_data(node_features,
+  edge_features, relationships)
+
+          return self.graph, graph_data
+
+      def build_inference_graph(self, df):
+          """
+          Inference mode: Content nodes only, GNN will 
+  predict edge labels
+          
+          Args:
+              df (pd.DataFrame): Input DataFrame
+              
+          Returns:
+              tuple: (graph, graph_data) ready for GNN 
+  inference
+          """
+          # Only create content nodes - no edge 
+  computation
+          self.graph, node_features =
+  self.create_content_nodes(df)
+
+          # Create complete bipartite edge structure for 
+  GNN to classify
+          potential_edges =
+  self.create_potential_edges(df)
+
+          # Prepare inference data
+          graph_data =
+  self.prepare_inference_data(node_features,
+  potential_edges)
+
+          return self.graph, graph_data
+
+      def create_content_nodes(self, df):
+          """
+          Create nodes with rich content embeddings
+          
+          Args:
+              df (pd.DataFrame): Input DataFrame
+              
+          Returns:
+              tuple: (graph, node_features)
+          """
+          self.graph.clear()
+
+          # Extract content-based embeddings
+          node_features =
+  self.feature_tokenizer.batch_tokenize_columns(df,
+  self.content_extractor)
+
+          # Add nodes to graph with content features
+          for idx, col in enumerate(df.columns):
+              self.graph.add_node(
+                  f"col_{col}",
+                  node_type="column",
+                  column_name=col,
+                  features=node_features[idx],
+                  node_index=idx
+              )
+
+          return self.graph, node_features
+
+      def add_semantic_edges(self, relationships):
+          """
+          Add edges with computed semantic labels 
+  (training mode)
+          
+          Args:
+              relationships (list): Output from 
+  RelationshipGenerator
+              
+          Returns:
+              torch.Tensor: Embedded semantic labels
+          """
+          edge_labels = []
+
+          for rel in relationships:
+              # Add edge to NetworkX graph with full 
+  information
+              self.graph.add_edge(
+                  f"col_{rel['col1']}",
+                  f"col_{rel['col2']}",
+                  feature_label=rel['feature_label'],
+
+  semantic_meaning=rel['semantic_meaning'],
+
+  auxiliary_features=rel['auxiliary_features']
+              )
+
+              edge_labels.append(rel['feature_label'])
+
+          # Embed semantic labels for training
+          return self.feature_tokenizer.batch_tokenize_se
+  mantic_labels(edge_labels)
+
+      def create_potential_edges(self, df):
+          """
+          Create all potential edges for inference (no 
+  labels computed)
+          
+          Args:
+              df (pd.DataFrame): Input DataFrame
+              
+          Returns:
+              list: List of potential edge pairs
+          """
+          potential_edges = []
+          columns = df.columns.tolist()
+
+          for i, col1 in enumerate(columns):
+              for col2 in columns[i+1:]:
+                  potential_edges.append((f"col_{col1}",
+  f"col_{col2}"))
+
+          return potential_edges
+
+      def prepare_training_data(self, node_features, 
+  edge_features, relationships):
+          """
+          Prepare data structure for GNN training
+          
+          Args:
+              node_features (torch.Tensor): Content-based
+   node embeddings
+              edge_features (torch.Tensor): Semantic 
+  label embeddings  
+              relationships (list): Relationship 
+  information
+              
+          Returns:
+              dict: Training data structure
+          """
+          # Create edge index tensor
+          edge_index = []
+          edge_labels = []
+
+          for rel in relationships:
+              col1_idx =
+  list(self.graph.nodes()).index(f"col_{rel['col1']}")
+              col2_idx =
+  list(self.graph.nodes()).index(f"col_{rel['col2']}")
+
+              edge_index.extend([[col1_idx, col2_idx],
+  [col2_idx, col1_idx]])  # Undirected
+              edge_labels.extend([rel['feature_label'],
+  rel['feature_label']])
+
+          return {
+              'node_features': node_features,
+              'edge_index':
+  torch.tensor(edge_index).t().contiguous(),
+              'edge_labels': edge_labels,
+              'edge_features': edge_features,
+              'num_nodes': len(self.graph.nodes()),
+              'num_edges': len(relationships)
+          }
+
+      def prepare_inference_data(self, node_features, 
+  potential_edges):
+          """
+          Prepare data structure for GNN inference
+          
+          Args:
+              node_features (torch.Tensor): Content-based
+   node embeddings
+              potential_edges (list): All potential edge 
+  pairs
+              
+          Returns:
+              dict: Inference data structure
+          """
+          # Create edge index for all potential edges
+          edge_index = []
+          node_list = list(self.graph.nodes())
+
+          for edge in potential_edges:
+              col1_idx = node_list.index(edge[0])
+              col2_idx = node_list.index(edge[1])
+              edge_index.extend([[col1_idx, col2_idx],
+  [col2_idx, col1_idx]])
+
+          return {
+              'node_features': node_features,
+              'edge_index':
+  torch.tensor(edge_index).t().contiguous(),
+              'potential_edges': potential_edges,
+              'num_nodes': len(self.graph.nodes()),
+              'num_potential_edges': len(potential_edges)
+          }
+
+      def get_graph_summary(self):
+          """
+          Get summary of constructed graph
+          
+          Returns:
+              dict: Graph statistics
+          """
+          summary = {
+              'num_nodes': self.graph.number_of_nodes(),
+              'num_edges': self.graph.number_of_edges(),
+              'mode': 'training' if self.training_mode
+  else 'inference'
+          }
+
+          if self.training_mode and
+  self.graph.number_of_edges() > 0:
+              summary['semantic_labels'] = [
+                  data['feature_label'] for _, _, data in
+   self.graph.edges(data=True)
+              ]
+              summary['label_distribution'] =
+  self._get_label_distribution()
+
+          return summary
+
+      def _get_label_distribution(self):
+          """Get distribution of semantic labels in the 
+  graph"""
+          labels = [data['feature_label'] for _, _, data
+  in self.graph.edges(data=True)]
+          from collections import Counter
+          return Counter(labels)
+
+      def set_mode(self, training_mode):
+          """Switch between training and inference 
+  modes"""
+          self.training_mode = training_mode
+
+⏺ Key Changes Made:
+
+  1. ColumnContentExtractor: Increased sample size to 50
+  cells with comprehensive sampling strategies
+  2. FeatureTokenizer: Enhanced to handle longer content
+  sequences (1024 tokens) and both content + labels
+  3. GraphBuilder: Dual-mode support for training
+  (content + computed labels) vs inference (content only)
+
+  This architecture enables rich content learning during
+  training while achieving fast inference through learned
+   content→label mappings.
+
+> answer briefly, given the types of strategies you have 
+  provided, what is the one most likely to yield results. 
+  remember, this will most likely be informed by the edge 
+  features i am creating as that is the mapping i am trying
+   to store in my GNN. the mapping is inherently 
+  computational, but in my opinion, training the GNN should
+   be invariant to what type of mapping it is, if i am 
+  wrong correct me, and then suggest the best strategy to 
+  implement during train time. also take into account i do 
+  not want strategies that are extremely hard to implement 
+  or brittle during inference time. think
+
+✻ Thinking…
+
+  The user is asking about which sampling strategy would be 
+  best for their specific use case. Let me think about this:
+
+  1. Their goal is to train a GNN to learn the mapping from 
+  column content to semantic relationship labels
+  2. The labels are derived from edge features like cosine 
+  similarity, jaccard similarity, and dtype similarity
+  3. The GNN needs to learn computational mappings 
+  (statistical relationships) from raw content
+  4. They want something that's not brittle and easy to 
+  implement
+
+  Let me analyze each strategy:
+
+  1. Comprehensive sampling: Complex, includes nulls + 
+  extremes + frequent + random + patterns
+    - Pros: Most information rich
+    - Cons: Complex to implement, might be noisy, brittle
+  2. Balanced sampling: 50-50 split between frequent and 
+  random
+    - Pros: Simple, balanced representation
+    - Cons: Might miss important patterns for statistical 
+  computation
+  3. Representative sampling: Includes edge cases, extremes, 
+  patterns
+    - Pros: Focuses on statistical representatives (min, max,
+   median, quartiles)
+    - Cons: More complex than balanced
+
+  Now, thinking about what the GNN needs to learn:
+
+  - Cosine similarity: Needs to understand value 
+  distributions and correlations
+  - Jaccard similarity: Needs to understand value overlap 
+  between columns  
+  - Dtype similarity: Needs to understand data types
+
+  For cosine similarity, the GNN needs to infer statistical 
+  relationships. This means it needs samples that represent 
+  the distribution well - extremes (min/max), central 
+  tendency (median/mean), and variability.
+
+  For jaccard similarity, it needs to see overlapping values 
+  between columns, so having a good mix of frequent and 
+  diverse values is important.
+
+  For dtype similarity, it needs to understand the nature of 
+  the data type, which can be inferred from the content 
+  patterns.
+
+  The user is right that training a GNN should be invariant 
+  to the type of mapping - GNNs are universal function 
+  approximators and can learn complex mappings if given 
+  sufficient training data and appropriate architecture.
+
+  I'll focus on representative sampling as the optimal 
+  approach. This strategy precisely captures the statistical 
+  nuances needed for semantic relationship learning. By 
+  targeting min, max, median, and quartiles, it provides a 
+  comprehensive view of data distribution. The approach 
+  balances complexity and insight, ensuring the GNN can 
+  extract meaningful patterns without overwhelming 
+  computational overhead. It's particularly effective for 
+  understanding cosine and jaccard similarities, capturing 
+  both extreme values and frequent patterns that are crucial 
+  for robust machine learning model training.
+
+⏺ Best Strategy: Representative Sampling
+
+  Short Answer: representative sampling strategy is most
+  likely to yield results.
+
+  Reasoning:
+
+  Why Representative Sampling Works Best:
+
+  1. Aligns with Edge Feature Computation:
+    - Includes min/max/median → directly supports cosine
+  similarity learning
+    - Includes frequent values → supports jaccard overlap
+   detection
+    - Includes edge cases → helps GNN understand value
+  ranges and distributions
+  2. You're Correct About GNN Training: GNNs are
+  universal function approximators and can learn any
+  continuous mapping given sufficient data. The mapping
+  type (computational vs semantic) doesn't matter - what
+  matters is representativeness of the input features.
+  3. Statistical Foundation: Since your edge features are
+   inherently statistical (cosine, jaccard, cardinality),
+   the GNN needs samples that capture the distributional 
+  properties your edge computations rely on.
+
+  Implementation Recommendation:
+
+  def _representative_sample(self, series):
+      """Optimized for statistical relationship 
+  learning"""
+      sample = []
+      clean_series = series.dropna()
+
+      # 1. Null representation (if exists)
+      if series.isnull().any():
+          sample.append("<NULL>")
+
+      # 2. Statistical extremes (critical for cosine 
+  similarity)
+      if pd.api.types.is_numeric_dtype(series):
+          sample.extend([
+              clean_series.min(),
+              clean_series.max(),
+              clean_series.median(),
+              clean_series.mean()
+          ])
+
+      # 3. Most frequent values (critical for jaccard 
+  similarity)
+      value_counts = clean_series.value_counts()
+      remaining_slots = self.sample_size - len(sample)
+      frequent_portion = int(remaining_slots * 0.7)  # 
+  70% frequent
+
+      sample.extend(value_counts.head(frequent_portion).i
+  ndex.tolist())
+
+      # 4. Random fill for diversity
+      # ... fill remaining slots
+
+      return sample[:self.sample_size]
+
+  Why Not Others:
+  - Comprehensive: Too complex, potential noise, harder
+  to debug
+  - Balanced: Misses statistical extremes crucial for
+  cosine similarity learning
+
+  Representative sampling gives the GNN exactly the
+  distributional information it needs to learn your
+  computational mappings while remaining simple and
+  robust.
+

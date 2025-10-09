@@ -315,7 +315,12 @@ class RelationshipGenerator:
             'value_similarity':self.cosine_similarity_values(df[col1], df[col2]),
             'jaccard_overlap':self.sampled_jaccard_similarity(df[col1], df[col2]),
             'cardinality_similarity':self.cardinality_similarity(df[col1], df[col2]),
-            'dtype_similarity':self.dtype_similarity(df[col1], df[col2])
+            'dtype_similarity':self.dtype_similarity(df[col1], df[col2]),
+            'id_reference':self.detect_id_reference_pattern(df[col1], df[col2]),
+            'hierarchical':self.detect_heirarchical_patterns(df[col1], df[col2]),
+            'functional_dependency':self.detect_functional_dependency(df[col1], df[col2]),
+            'measure_dimension':self.detect_measure_dimension_pattern(df[col1], df[col2]),
+            'temporal_dependency':self.detect_temporal_dependency(df[col1], df[col2])
         }
     def compute_labeled_relationships(self, df, label_generator):
         relationships=[]
@@ -324,14 +329,21 @@ class RelationshipGenerator:
             for col2 in columns[i+1:]:
                 raw_features=self.compute_edge_features(df, col1, col2)
                 feature_label=label_generator.generate_feature_label(raw_features)
-                relationships.append({
+                relationships.append(
+                    {
                     'col1':col1,
                     'col2':col2,
                     'feature_label':feature_label, #GNN PREDICTION TARGET
                     'semantic_meaning':label_generator.get_semantic_interpretation(feature_label),
-                    'auxiliary_features':{'name_similarity':raw_features['name_similarity'],
-                    'cardinality_similarity':raw_features['cardinality_similarity']
-                    }
+                    'auxiliary_features':{
+                        'name_similarity':raw_features['name_similarity'],
+                        'cardinality_similarity':raw_features['cardinality_similarity'],
+                        'id_reference': raw_features['id_reference'],
+                        'hierarchical':raw_features['hierarchical'],
+                        'functional_dependency':raw_features['functional_dependency'],
+                        'measure_dimension':raw_features['measure_dimension'],
+                        'temporal_dependency':raw_features['temporal_dependency'],
+                        }
                 })
         return relationships
     def cosine_similarity_names(self, col1, col2):
@@ -409,12 +421,13 @@ class RelationshipGenerator:
         s1_clean=series1.dropna()
         s2_clean=series2.dropna()
         if len(s1_clean)==0 or len(s2_clean)==0:
-            s1_unique=set(s1_clean.unique())
-            s2_unique=set(s2_clean.unique())
-            if len(s2_unique)==0:
-                return 0.0
+            return 0.0
+        s1_unique=set(s1_clean.unique())
+        s2_unique=set(s2_clean.unique())
+        if len(s2_unique)==0:
+            return 0.0
         #Check for containment: s2 in s1
-        containtment_ratio=len(s2_unique & s1_unique)/len(s2_unique)
+        containment_ratio=len(s2_unique & s1_unique)/len(s2_unique)
         #Check for cardinality ratio: s1.unique > s2.unique for FK reln
         cardinality_ratio=len(s1_unique)/max(len(s2_unique), 1)
         #Boost score if ID patterns
@@ -424,9 +437,9 @@ class RelationshipGenerator:
         if ('id' in col1_name and 'id' in col2_name) or (col1_name.endswith('_id') or col2_name.endswith('_id')):
             name_boost=1.3
         #FK Score: High containment + good cardinality ratio
-        if containtment_ratio>0.7 and cardinality_ratio>1.5:
-            return min(1.0, containtment_ratio*min(cardinality_ratio/10, 1.0)*name_boost)
-        return containtment_ratio*0.3 #partial credit for some containment
+        if containment_ratio>0.7 and cardinality_ratio>1.5:
+            return min(1.0, containment_ratio*min(cardinality_ratio/10, 1.0)*name_boost)
+        return containment_ratio*0.3 #partial credit for some containment
     def detect_heirarchical_patterns(self, series1, series2):
         if not (pd.api.types.is_string_dtype(series1) or pd.api.types.is_object_dtype(series1)) or not (pd.api.types.is_string_dtype(series2) or pd.api.types.is_object_dtype(series2)):
             return 0.0
@@ -521,7 +534,7 @@ class RelationshipGenerator:
                 pass
         if not (s1_datetime and s2_datetime):
             if pd.api.types.is_numeric_dtype(series1) and pd.api.types.is_numeric_dtype(series2):
-                return self._detect_numeric_sequence_correlation(series1, series1)
+                return self._detect_numeric_sequence_correlation(series1, series2)
             return 0.0
         try:
             #Convert to datetime if needed
@@ -530,7 +543,7 @@ class RelationshipGenerator:
             else:
                 dt1=series1
             if s2_datetime and not pd.api.types.is_datetime64_any_dtype(series2):
-                dt2=pd.to_datetime(series2, errors='corece')
+                dt2=pd.to_datetime(series2, errors='coerce')
             else:
                 dt2=series2
             df_temp=pd.DataFrame({'dt1':dt1, 'dt2':dt2}).dropna()
@@ -772,7 +785,7 @@ class GraphBuilder:
         edge_labels=[]
         for rel in relationships:
             #Sparse Connectivity to avoid emulating a MLP cosplaying as a graph
-            if self._passes_thresholds(rel):
+            if self._passes_threshold(rel):
                 src_idx=node_mapping[rel['col1']]
                 dst_idx=node_mapping[rel['col2']]
                 #Undirected Edges: Add both directions
@@ -790,7 +803,7 @@ class GraphBuilder:
             src_idx=node_mapping[rel['col1']]
             dst_idx=node_mapping[rel['col2']]
             #Undirected edges
-            edge_index.extend([src_idx, dst_idx], [dst_idx, src_idx])
+            edge_index.extend([[src_idx, dst_idx], [dst_idx, src_idx]])
         return torch.tensor(edge_index).T if edge_index else torch.empty((2,0), dtype=torch.long)
     def _passes_threshold(self, relationship):
         return relationship.get('composite_score', 0)>=self.relationship_generator.thresholds['composite_threshold']
@@ -822,7 +835,7 @@ class GNNEdgePredictor(torch.nn.Module):
                                                  torch.nn.Dropout(dropout),
                                                  torch.nn.Linear(hidden_dim//2, num_classes)
                                                  )
-        self.criteion=torch.nn.CrossEntropyLoss()
+        self.criterion=torch.nn.CrossEntropyLoss()
         self.optimizer=torch.optim.Adam(self.parameters(), lr=0.01) #Tweak Tweak
     def forward(self, pyg_data):
         #Forward Pass: Node Features -> GNN -> Edge Predictions
@@ -841,7 +854,7 @@ class GNNEdgePredictor(torch.nn.Module):
         self.train()
         self.optimizer.zero_grad()
         edge_logits=self.forward(pyg_data)
-        loss=self.criteion(edge_logits, pyg_data.edge_attr)
+        loss=self.criterion(edge_logits, pyg_data.edge_attr)
         loss.backward()
         self.optimizer.step()
         #Calculate accuracy for monitoring
@@ -858,7 +871,7 @@ class GNNEdgePredictor(torch.nn.Module):
         return predictions, max_confidences
 class Table2GraphPipeLine:
     def __init__(self, embedding_strategy='hybrid'):
-        self.content_extractor=ColumnContentExtractor
+        self.content_extractor=ColumnContentExtractor()
         self.feature_tokenizer=LightweightFeatureTokenizer(embedding_strategy)
         self.relationship_generator=None #We keep this None for the classification task, maybe later when we move to more complex architectures which capture relationality we can think about embedding similarity
         self.semantic_label_generator=SemanticLabelGenerator()
