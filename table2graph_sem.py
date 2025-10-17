@@ -1,17 +1,8 @@
-import networkx as nx
-from transformers import AutoTokenizer, AutoModelForCausalLM, DynamicCache
 import torch
 import pandas as pd
 import numpy as np
-import itertools
-from llm_call import generate_batch_without_decode
-import matplotlib.pyplot as plt
 from torch_geometric.data import Data
 from gcn_conv import TableGCN
-from projection_layer import LLMProjector
-import time
-from langchain_ollama import OllamaLLM
-from vllm import LLM, SamplingParams
 from pathlib import Path
 
 PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
@@ -25,42 +16,6 @@ model_dict = {
 }
 
 llm=None
-
-class HFModel():
-    def __init__(self):
-        self.model=None
-        self.tokenizer=None
-        self.device=None
-    
-    def set_model(self, model_key="m1"):
-        self.model=AutoModelForCausalLM.from_pretrained(model_dict[model_key])
-        self.tokenizer=AutoTokenizer.from_pretrained(model_dict[model_key])
-        self.tokenizer.pad_token=self.tokenizer.eos_token
-    
-    def set_and_move_device(self):
-        self.device=torch.device("cuda")
-        self.model=self.model.to(self.device)
-
-class vLLMModel():
-    def __init__(self):
-        self.llm=None
-        self.sampling_params=SamplingParams(
-            temperature=0.2,
-            top_p=0.7,
-            top_k=50,
-            max_tokens=50
-            )
-
-    def load_llm(self):
-        self.llm=LLM(
-            model="meta-llama/Llama-3.2-3B",
-            gpu_memory_utilization=0.8,
-           )
-    
-    def generate_response(self, prompt):
-        if self.llm==None:
-            raise ValueError("LLM not loaded, call load_llm first.")
-        return self.llm.generate(prompt, self.sampling_params)
 
 class DataProcessor:
     def __init__(self):
@@ -280,17 +235,21 @@ class ColumnContentExtractor:
 
 
 class RelationshipGenerator:
-    def __init__(self, model_manager, threshold_config=None):
-        self.model=model_manager.model
-        self.tokenizer=model_manager.tokenizer
+    def __init__(self, threshold_config=None):
         self.thresholds=threshold_config or {
             'composite_threshold':0.4,
             'weights': {
-                'name_similarity':0.2,
-                'value_similarity':0.3,
-                'jaccard_overlap':0.2,
-                'cardinality_similarity':0.15,
-                'dtype_similarity':0.15
+                'name_similarity':0.10,
+                'value_similarity':0.15,
+                'jaccard_overlap':0.1,
+                'cardinality_similarity':0.05,
+                'dtype_similarity':0.05,
+                #Semantic Features
+                'id_reference':0.15,
+                'hierarchical':0.10,
+                'functional_dependency':0.10,
+                'measure_dimension':0.10,
+                'temporal_dependency':0.10
             }
         }
         self.sample_size=100 #For Jaccard~1000
@@ -317,7 +276,7 @@ class RelationshipGenerator:
             'cardinality_similarity':self.cardinality_similarity(df[col1], df[col2]),
             'dtype_similarity':self.dtype_similarity(df[col1], df[col2]),
             'id_reference':self.detect_id_reference_pattern(df[col1], df[col2]),
-            'hierarchical':self.detect_heirarchical_patterns(df[col1], df[col2]),
+            'hierarchical':self.detect_hierarchical_pattern(df[col1], df[col2]),
             'functional_dependency':self.detect_functional_dependency(df[col1], df[col2]),
             'measure_dimension':self.detect_measure_dimension_pattern(df[col1], df[col2]),
             'temporal_dependency':self.detect_temporal_dependency(df[col1], df[col2])
@@ -440,7 +399,7 @@ class RelationshipGenerator:
         if containment_ratio>0.7 and cardinality_ratio>1.5:
             return min(1.0, containment_ratio*min(cardinality_ratio/10, 1.0)*name_boost)
         return containment_ratio*0.3 #partial credit for some containment
-    def detect_heirarchical_patterns(self, series1, series2):
+    def detect_hierarchical_pattern(self, series1, series2):
         if not (pd.api.types.is_string_dtype(series1) or pd.api.types.is_object_dtype(series1)) or not (pd.api.types.is_string_dtype(series2) or pd.api.types.is_object_dtype(series2)):
             return 0.0
         s1_sample=series1.dropna().astype(str).sample(min(50, len(series1.dropna())), random_state=42)
@@ -576,60 +535,234 @@ class RelationshipGenerator:
     
     def _compute_composite_score(self,edge_features):
         weights=self.thresholds['weights']
-        return sum(edge_features[metric]*weights[metric] for metric in edge_features)
+        return sum(edge_features[metric]*weights.get(metric, 0.0) for metric in edge_features if metric in weights)
     
 class SemanticLabelGenerator: #Will require serious rework
     def __init__(self):
-        self.intervals={
-            'low':(0.00, 0.33),
-            'medium':(0.34, 0.67),
-            'high':(0.68, 1.00)
-        }
-        self.semantic_ontology=self._create_18_label_ontology()
-    def extract_core_features(self, edge_features):
-        return {
-            'cosine_relationality':edge_features['value_similarity'],
-            'jaccard_sampling':edge_features['jaccard_overlap'],
-            'same_dtype': 1 if edge_features['dtype_similarity']==1.0 else 0
-        }
-    def discretize_features(self, value, feature_name):
-        if feature_name=='same_dtype':
-            return 'NUM' if value==1 else 'CAT'
-        for interval, (low, high) in self.intervals.items():
-            if low<=value<=high:
-                return interval.upper()
-        return 'LOW' #fallback uhhh, judas gonna be mine
+        self.semantic_ontology=self._create_semantic_ontology()
     def generate_feature_label(self, edge_features):
-        core=self.extract_core_features(edge_features)
-        cos_interval=self.discretize_features(core['cosine_relationality'], 'cosine')
-        jac_interval=self.discretize_features(core['jaccard_sampling'], 'jaccard')
-        dtype_flag=self.discretize_features(core['same_dtype'], 'same_dtype')
-        return f"{cos_interval}_COS_{jac_interval}_JAC_{dtype_flag}"
+        """
+        Rule-based semantic classification using decision tree.
+        Priority order: JOIN → TEMPORAL → AGGREGATION → DERIVATION → STRUCTURAL → FALLBACK
+        """
+        # Extract semantic features
+        id_ref = edge_features.get('id_reference', 0.0)
+        hier = edge_features.get('hierarchical', 0.0)
+        func_dep = edge_features.get('functional_dependency', 0.0)
+        meas_dim = edge_features.get('measure_dimension', 0.0)
+        temp_dep = edge_features.get('temporal_dependency', 0.0)
+        
+        # Extract statistical features (supporting evidence)
+        val_sim = edge_features.get('value_similarity', 0.0)
+        jac_sim = edge_features.get('jaccard_overlap', 0.0)
+        dtype_sim = edge_features.get('dtype_similarity', 0.0)
+        card_sim = edge_features.get('cardinality_similarity', 0.0)
+        name_sim = edge_features.get('name_similarity', 0.0)
+        
+        # ==================== PRIORITY 1: JOIN RELATIONSHIPS ====================
+        # Primary Foreign Key: Strong ID reference + functional dependency
+        if id_ref > 0.7 and func_dep > 0.7:
+            return "PRIMARY_FOREIGN_KEY"
+        
+        # Foreign Key Candidate: Moderate ID reference
+        if id_ref > 0.5 and func_dep > 0.5:
+            return "FOREIGN_KEY_CANDIDATE"
+        
+        # Reverse Foreign Key: High containment but reversed cardinality
+        if id_ref > 0.6 and card_sim < 0.3:
+            return "REVERSE_FOREIGN_KEY"
+        
+        # Natural Join: High overlap with same type
+        if jac_sim > 0.7 and dtype_sim == 1.0 and val_sim > 0.5:
+            return "NATURAL_JOIN_CANDIDATE"
+        
+        # Weak Join: Some overlap with compatible types
+        if jac_sim > 0.4 and dtype_sim > 0.7:
+            return "WEAK_JOIN_CANDIDATE"
+        
+        # Cross Table Reference: Moderate ID reference, different types
+        if id_ref > 0.4 and dtype_sim < 0.5:
+            return "CROSS_TABLE_REFERENCE"
+        
+        # Many-to-Many: High overlap but low functional dependency
+        if jac_sim > 0.6 and func_dep < 0.3:
+            return "MANY_TO_MANY_REFERENCE"
+        
+        # Self-Referential: High ID reference with moderate functional dependency
+        if id_ref > 0.5 and func_dep > 0.3 and func_dep < 0.7:
+            return "SELF_REFERENTIAL_KEY"
+        
+        # ==================== PRIORITY 2: TEMPORAL RELATIONSHIPS ====================
+        # Strong Temporal Sequence
+        if temp_dep > 0.7:
+            return "TEMPORAL_SEQUENCE_STRONG"
+        
+        # Weak Temporal Sequence
+        if temp_dep > 0.4:
+            return "TEMPORAL_SEQUENCE_WEAK"
+        
+        # Temporal Correlation: Moderate temporal + value correlation
+        if temp_dep > 0.3 and val_sim > 0.5:
+            return "TEMPORAL_CORRELATION"
+        
+        # ==================== PRIORITY 3: AGGREGATION RELATIONSHIPS ====================
+        # Strong Measure-Dimension
+        if meas_dim > 0.7:
+            return "MEASURE_DIMENSION_STRONG"
+        
+        # Dimension Hierarchy: Hierarchical + measure pattern
+        if hier > 0.5 and meas_dim > 0.4:
+            return "DIMENSION_HIERARCHY"
+        
+        # Weak Measure-Dimension
+        if meas_dim > 0.4:
+            return "MEASURE_DIMENSION_WEAK"
+        
+        # Fact-Dimension: Measure pattern with high cardinality difference
+        if meas_dim > 0.3 and card_sim < 0.2:
+            return "FACT_DIMENSION"
+        
+        # Natural Grouping: Moderate measure-dimension without hierarchy
+        if meas_dim > 0.3 and hier < 0.3:
+            return "NATURAL_GROUPING"
+        
+        # Nested Aggregation: Hierarchical + measure-dimension
+        if hier > 0.4 and meas_dim > 0.3:
+            return "NESTED_AGGREGATION"
+        
+        # Pivot Candidate: Low cardinality categorical with numeric
+        if meas_dim > 0.2 and card_sim < 0.15:
+            return "PIVOT_CANDIDATE"
+        
+        # ==================== PRIORITY 4: DERIVATION RELATIONSHIPS ====================
+        # Redundant Column: Very high similarity
+        if val_sim > 0.9 and jac_sim > 0.8:
+            return "REDUNDANT_COLUMN"
+        
+        # Functional Transformation: High functional dependency, low overlap
+        if func_dep > 0.8 and val_sim < 0.3:
+            return "FUNCTIONAL_TRANSFORMATION"
+        
+        # Derived Calculation: High similarity, different names
+        if val_sim > 0.7 and name_sim < 0.3:
+            return "DERIVED_CALCULATION"
+        
+        # Aggregated Derivation: Hierarchical + functional dependency
+        if hier > 0.5 and func_dep > 0.5:
+            return "AGGREGATED_DERIVATION"
+        
+        # Normalized Variant: High value similarity with same dtype
+        if val_sim > 0.8 and dtype_sim == 1.0:
+            return "NORMALIZED_VARIANT"
+        
+        # Synonym Column: High name similarity
+        if name_sim > 0.7 and jac_sim > 0.3:
+            return "SYNONYM_COLUMN"
+        
+        # ==================== PRIORITY 5: STRUCTURAL RELATIONSHIPS ====================
+        # Composite Key Component: High uniqueness patterns
+        if func_dep > 0.6 and id_ref > 0.3:
+            return "COMPOSITE_KEY_COMPONENT"
+        
+        # Partition Key: Low cardinality, moderate functional dependency
+        if card_sim < 0.15 and func_dep > 0.4:
+            return "PARTITION_KEY"
+        
+        # Index Candidate: High uniqueness potential
+        if func_dep > 0.5 and jac_sim < 0.4:
+            return "INDEX_CANDIDATE"
+        
+        # Audit Relationship: Temporal without correlation
+        if temp_dep > 0.2 and val_sim < 0.3:
+            return "AUDIT_RELATIONSHIP"
+        
+        # Version Tracking: Sequential + temporal
+        if temp_dep > 0.2 and func_dep > 0.3:
+            return "VERSION_TRACKING"
+        
+        # ==================== PRIORITY 6: FALLBACK ====================
+        # Weak Correlation: Some statistical signal
+        if val_sim > 0.5 or jac_sim > 0.4:
+            return "WEAK_CORRELATION"
+        
+        # Ambiguous: Conflicting signals (multiple moderate features)
+        moderate_features = sum([
+            id_ref > 0.3,
+            hier > 0.3,
+            func_dep > 0.3,
+            meas_dim > 0.3,
+            temp_dep > 0.3
+        ])
+        if moderate_features >= 3:
+            return "AMBIGUOUS_RELATIONSHIP"
+        
+        # Independent: No clear pattern
+        return "INDEPENDENT_COLUMNS"
+
     def get_semantic_interpretation(self, feature_label):
         return self.semantic_ontology.get(feature_label, "UNKNOWN_RELATIONSHIP")
-    def _create_18_label_ontology(self):    #EXTREMELY IMPORTANT, EVERYTHING HINGES ON THESE DEFINITIONS, HEART OF SEMANTIC EMERGENCE
+    def _create_semantic_ontology(self):    #EXTREMELY IMPORTANT, EVERYTHING HINGES ON THESE DEFINITIONS, HEART OF SEMANTIC EMERGENCE
         return {
-            # HIGH COSINE (STRONG DIRECTIONAL RELATIONSHIP)
-            "HIGH_COS_HIGH_JAC_NUM":"LINEAR_NUMERICAL_DEPENDENCE_WITH_SHARED_VALUES",
-            "HIGH_COS_HIGH_JAC_CAT":"IDENTICAL_OR_REDUNDANT",
-            "HIGH_COS_MEDIUM_JAC_NUM":"COMPUTATIONAL_DEPENDENCE_WITH_SHARED_VALUES",
-            "HIGH_COS_MEDIUM_JAC_CAT":"STRONG_CATEGORICAL_RELATIONSHIP_PARTIAL_OVERLAP",
-            "HIGH_COS_LOW_JAC_NUM":"LINEAR_NUMERICAL_DEPENDENCE",
-            "HIGH_COS_LOW_JAC_CAT":"STRONG_CATEGORICAL_RELATIONSHIP_DISTINCT_VALUES",
-            # MEDIUM COSINE (MODERATE RELATIONSHIP)
-            "MEDIUM_COS_HIGH_JAC_NUM":"NUMERICAL_ALIAS_WITH_NOISE",
-            "MEDIUM_COS_HIGH_JAC_CAT":"MODERATE_CATEGORICAL_OVERLAP",
-            "MEDIUM_COS_MEDIUM_JAC_NUM":"MODERATE_NUMERICAL_CORRELATION_SHARED_VALUES",
-            "MEDIUM_COS_MEDIUM_JAC_CAT":"PARTIAL_CATEGORICAL_OVERLAP",
-            "MEDIUM_COS_LOW_JAC_NUM":"MODERATE_NUMERICAL_CORRELATION",
-            "MEDIUM_COS_LOW_JAC_CAT":"WEAK_CATEGORICAL_RELATIONSHIP",
-            # LOW COSINE (WEAK/NO DIRECTIONAL RELATIONSHIP)
-            "LOW_COS_HIGH_JAC_NUM":"NUMERICAL_IDENTITY_NO_CORRELATION",
-            "LOW_COS_HIGH_JAC_CAT":"CATEGORICAL_DERIVATION_OR_ALIAS",
-            "LOW_COS_MEDIUM_JAC_NUM":"SHARED_NUMERICAL_VALUES_NO_CORRELATION",
-            "LOW_COS_MEDIUM_JAC_CAT":"PARTIAL_CATEGORICAL_OVERLAP_NO_CORRELATION",
-            "LOW_COS_LOW_JAC_NUM":"WEAK_NUMERICAL_RELATIONSHIP",
-            "LOW_COS_LOW_JAC_CAT":"WEAK_HETEROGENEOUS_RELATIONSHIP"
+                    # ==================== CATEGORY 1: JOIN RELATIONSHIPS (8) ====================
+        # Foreign Key Patterns
+        "PRIMARY_FOREIGN_KEY": "Strong foreign key relationship - PRIMARY JOIN candidate with high containment and functional dependency",
+        "FOREIGN_KEY_CANDIDATE": "Likely foreign key relationship - NATURAL JOIN candidate with moderate ID reference pattern",
+        "REVERSE_FOREIGN_KEY": "Reverse foreign key pattern - JOIN possible but reversed cardinality",
+        
+        # Join Support Patterns
+        "NATURAL_JOIN_CANDIDATE": "High value overlap with same data type - NATURAL JOIN or USING clause candidate",
+        "WEAK_JOIN_CANDIDATE": "Some value overlap with compatible types - Possible JOIN with ON condition",
+        "CROSS_TABLE_REFERENCE": "Moderate reference pattern across different types - Complex JOIN candidate",
+        "MANY_TO_MANY_REFERENCE": "Low functional dependency with high overlap - Junction table pattern",
+        "SELF_REFERENTIAL_KEY": "High ID reference within related context - Hierarchical self-JOIN pattern",
+        
+        # ==================== CATEGORY 2: AGGREGATION RELATIONSHIPS (7) ====================
+        # Measure-Dimension Patterns
+        "MEASURE_DIMENSION_STRONG": "Strong measure-dimension relationship - PRIMARY GROUP BY with aggregation target",
+        "MEASURE_DIMENSION_WEAK": "Moderate measure-dimension relationship - Secondary GROUP BY candidate",
+        "DIMENSION_HIERARCHY": "Hierarchical categorical relationship - Nested GROUP BY or ROLLUP candidate",
+        "FACT_DIMENSION": "Fact-dimension pattern - Star schema relationship for aggregation queries",
+        
+        # Grouping Patterns
+        "NATURAL_GROUPING": "Natural grouping pattern - Direct GROUP BY relationship",
+        "NESTED_AGGREGATION": "Hierarchical with measure pattern - Multi-level GROUP BY with aggregations",
+        "PIVOT_CANDIDATE": "Low cardinality categorical with numeric - PIVOT or CASE aggregation candidate",
+        
+        # ==================== CATEGORY 3: ORDERING RELATIONSHIPS (5) ====================
+        # Temporal Ordering
+        "TEMPORAL_SEQUENCE_STRONG": "Strong temporal correlation - PRIMARY ORDER BY candidate for time-series",
+        "TEMPORAL_SEQUENCE_WEAK": "Moderate temporal correlation - Secondary ORDER BY or time-based filtering",
+        "TEMPORAL_CORRELATION": "Datetime columns with correlation - Time-based JOIN or ORDER BY candidate",
+        
+        # Sequential Ordering
+        "SEQUENTIAL_ORDERING": "Numeric sequence correlation - ORDER BY candidate for ranked queries",
+        "RANKED_RELATIONSHIP": "Ordinal pattern detected - RANK or ROW_NUMBER partitioning candidate",
+        
+        # ==================== CATEGORY 4: DERIVATION RELATIONSHIPS (6) ====================
+        # Calculated Columns
+        "DERIVED_CALCULATION": "High similarity with different names - One column likely calculated from other",
+        "FUNCTIONAL_TRANSFORMATION": "Strong functional dependency without overlap - Mathematical or string transformation",
+        "AGGREGATED_DERIVATION": "Parent-child with aggregation pattern - Derived aggregate or summary column",
+        
+        # Data Quality / Redundancy
+        "REDUNDANT_COLUMN": "Nearly identical content - Candidate for deduplication or normalization",
+        "NORMALIZED_VARIANT": "Same semantic content, different encoding - Normalization or standardization variant",
+        "SYNONYM_COLUMN": "High name similarity with compatible content - Potential synonym or alias column",
+        
+        # ==================== CATEGORY 5: STRUCTURAL RELATIONSHIPS (5) ====================
+        # Schema Structure
+        "COMPOSITE_KEY_COMPONENT": "Part of composite key pattern - Multi-column uniqueness constraint",
+        "PARTITION_KEY": "Low cardinality with high coverage - Table partitioning candidate",
+        "INDEX_CANDIDATE": "High uniqueness with filtering potential - Index creation candidate",
+        
+        # Metadata Relationships
+        "AUDIT_RELATIONSHIP": "Temporal with low correlation - Audit trail or timestamp tracking",
+        "VERSION_TRACKING": "Sequential with temporal patterns - Version control or change tracking",
+        
+        # ==================== CATEGORY 6: WEAK/UNKNOWN (3) ====================
+        "WEAK_CORRELATION": "Some statistical correlation without clear semantic pattern",
+        "INDEPENDENT_COLUMNS": "No clear relationship detected - Likely unrelated columns",
+        "AMBIGUOUS_RELATIONSHIP": "Conflicting semantic signals - Requires manual review"
         }
     
 class FeatureTokenizer:
@@ -836,7 +969,7 @@ class GNNEdgePredictor(torch.nn.Module):
                                                  torch.nn.Linear(hidden_dim//2, num_classes)
                                                  )
         self.criterion=torch.nn.CrossEntropyLoss()
-        self.optimizer=torch.optim.Adam(self.parameters(), lr=0.01) #Tweak Tweak
+        self.optimizer=torch.optim.Adam(self.parameters(), lr=0.001) #Tweak Tweak
     def forward(self, pyg_data):
         #Forward Pass: Node Features -> GNN -> Edge Predictions
         # ---
@@ -869,7 +1002,7 @@ class GNNEdgePredictor(torch.nn.Module):
             confidences=torch.softmax(edge_logits, dim=1)
             max_confidences=torch.max(confidences, dim=1)[0]
         return predictions, max_confidences
-class Table2GraphPipeLine:
+class Table2GraphPipeline:
     def __init__(self, embedding_strategy='hybrid'):
         self.content_extractor=ColumnContentExtractor()
         self.feature_tokenizer=LightweightFeatureTokenizer(embedding_strategy)
@@ -879,10 +1012,10 @@ class Table2GraphPipeLine:
         self.train_builder=None
         self.test_builder=None
         self.predictor=None
-    def initialize_for_training(self, model_manager=None, node_dim=512):
+    def initialize_for_training(self, node_dim=512):
         #Init RelationshipGenerator if needed
         if self.relationship_generator is None:
-            self.relationship_generator=RelationshipGenerator(model_manager, threshold_config={'composite_threshold':0.3})
+            self.relationship_generator=RelationshipGenerator(threshold_config={'composite_threshold':0.3})
         self.train_builder=GraphBuilder(
             self.content_extractor,
             self.feature_tokenizer,
@@ -896,7 +1029,7 @@ class Table2GraphPipeLine:
             num_classes=self.train_builder.num_classes,
             num_layers=3
         )
-    def initialise_for_testing(self):
+    def initialize_for_testing(self):
         self.test_builder=GraphBuilder(
             self.content_extractor,
             self.feature_tokenizer,
