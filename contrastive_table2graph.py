@@ -1,3 +1,16 @@
+"""
+Contrastive Learning Pipeline for Table-to-Graph Semantic Analysis
+====================================================================
+
+This file implements a contrastive learning approach where:
+- Table structures are converted to graph embeddings using GNNs
+- Graph embeddings are aligned with question embeddings using InfoNCE loss
+- Edges are created based on computed features (sparse graph construction)
+- Training optimizes table-question alignment rather than edge classification
+
+This is a refactor of table2graph_sem.py to support the contrastive learning paradigm.
+"""
+
 import torch
 import pandas as pd
 import numpy as np
@@ -7,22 +20,16 @@ from pathlib import Path
 
 PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
 
-model_dict = {
-    "m1": "gpt2",
-    "m2": "HuggingFaceTB/SmolLM-135M",
-    "m3": "meta-llama/Llama-3.1-8B",
-    "m4": "google-t5/t5-small",
-    "m5": "meta-llama/Llama-3.2-3B",
-}
-
-llm=None
+# ============================================================================
+# DATA LOADING & PREPROCESSING
+# ============================================================================
 
 class DataProcessor:
     def __init__(self):
         self.config={}
         self.supported_formats=[".csv", ".xlsx", ".json", ".parquet"]
         self.data_cache={}
-    
+
     def load_data(self, filename, **kwargs):
         file_ext=Path(filename).suffix.lower()
         if filename in self.data_cache:
@@ -38,7 +45,7 @@ class DataProcessor:
         df=loaders[file_ext](filename, **kwargs)
         self.data_cache[filename]=df
         return df
-    
+
     def validate_data(self, df):
         report={
             'errors':[],
@@ -80,7 +87,7 @@ class DataProcessor:
             'memory_usage_mb': df.memory_usage(deep=True).sum()/1024**2
         }
 
-    def preprocess_columns(self, df): #Think about impact on training, should we include messy column names?
+    def preprocess_columns(self, df):
         df_clean=df.copy()
         df_clean.columns=df_clean.columns.str.strip()
         df_clean.columns=df_clean.columns.str.replace(' ', '_')
@@ -111,41 +118,9 @@ class DataProcessor:
                     column_types[col]='text'
         return column_types
 
-class ColumnStatsExtractor:
-    def __init__(self):
-        self.digit_pattern=r'\d'
-        self.special_char_pattern=r'[^a-zA-Z0-9\s]'
-    def get_col_stats(self, df, col):
-        series = df[col]
-        stats = {f"column_name {col}":{
-            "column_name": f" {col}",
-            "column_data_type": f" {str(series.dtype)}",
-            "unique_count": f" {len(series.unique())}",
-            "null_count": f" {series.isnull().sum()}"
-        }}
-        if pd.api.types.is_numeric_dtype(series):
-            stats[f"column_name {col}"].update(self.extract_numeric_stats(series))
-        if pd.api.types.is_string_dtype(series):
-            stats[f"column_name {col}"].update(self.extract_string_stats(series))
-        return stats
-    def extract_numeric_stats(self, series):
-        return {
-                "mean": f" {series.mean()}",
-                "standard_deviation": f" {series.std()}",
-            }
-    def extract_string_stats(self, series):
-        return {
-                "avg_length_elements": f" {series.str.len().mean()}",
-                "contains_numbers": f" {series.str.contains(self.digit_pattern).any()}",
-            }
-    #ToDo: Add datetime and categorical stat extractors
-    def get_batch_stats(self, df, columns=None):
-        if columns is None:
-            columns=df.columns.tolist()
-        batch_stats={}
-        for col in columns:
-            batch_stats[col]=self.get_col_stats(df, col)
-        return batch_stats  
+# ============================================================================
+# COLUMN CONTENT EXTRACTION
+# ============================================================================
 
 class ColumnContentExtractor:
     def __init__(self, sample_size=50):
@@ -206,7 +181,6 @@ class ColumnContentExtractor:
             else:
                 sample.append("<EMPTY>")
         return sample[:self.sample_size]
-    #ToDo: Implement other sampling methods, but lets stick to comprehensive for now
     def _format_content_for_tokenization(self, col_name, series, sample_content):
         formatted_values=[]
         for value in sample_content:
@@ -231,8 +205,9 @@ class ColumnContentExtractor:
             batch_content[col]=self.get_col_stats(df, col)
         return batch_content
 
-        
-
+# ============================================================================
+# RELATIONSHIP FEATURE COMPUTATION
+# ============================================================================
 
 class RelationshipGenerator:
     def __init__(self, threshold_config=None):
@@ -252,7 +227,7 @@ class RelationshipGenerator:
                 'temporal_dependency':0.10
             }
         }
-        self.sample_size=100 #For Jaccard~1000
+        self.sample_size=100
     def compute_all_relationship_scores(self, df, stats_dict=None):
         relationships=[]
         columns=df.columns.tolist()
@@ -262,7 +237,7 @@ class RelationshipGenerator:
                 composite_score=self._compute_composite_score(edge_features)
                 if composite_score>=self.thresholds['composite_threshold']:
                     relationships.append({
-                        'col1':col1, #why col1 and col2?
+                        'col1':col1,
                         'col2':col2,
                         'edge_features':edge_features,
                         'composite_score':composite_score
@@ -284,23 +259,19 @@ class RelationshipGenerator:
     def compute_labeled_relationships(self, df, label_generator):
         relationships=[]
         columns=df.columns.tolist()
-        # ============ DEBUG: Track composite scores ============
         all_composite_scores = []
-        # ============ END DEBUG ============
         for i, col1 in enumerate(columns):
             for col2 in columns[i+1:]:
                 raw_features=self.compute_edge_features(df, col1, col2)
-                # ============ DEBUG: Calculate composite score ============
                 composite_score = self._compute_composite_score(raw_features)
                 all_composite_scores.append(composite_score)
-                # ============ END DEBUG ============
                 feature_label=label_generator.generate_feature_label(raw_features)
                 relationships.append(
                     {
                     'col1':col1,
                     'col2':col2,
-                    'feature_label':feature_label, #GNN PREDICTION TARGET
-                    'composite_score':composite_score, #For threshold filtering
+                    'feature_label':feature_label,
+                    'composite_score':composite_score,
                     'semantic_meaning':label_generator.get_semantic_interpretation(feature_label),
                     'auxiliary_features':{
                         'name_similarity':raw_features['name_similarity'],
@@ -312,7 +283,6 @@ class RelationshipGenerator:
                         'temporal_dependency':raw_features['temporal_dependency'],
                         }
                 })
-        # ============ DEBUG: Print composite score statistics ============
         if all_composite_scores:
             print(f"\n[Composite Score Stats for {df.shape}]")
             print(f"  Min:    {min(all_composite_scores):.4f}")
@@ -322,21 +292,14 @@ class RelationshipGenerator:
             print(f"  Threshold: {self.thresholds['composite_threshold']:.4f}")
             above_threshold = sum(1 for s in all_composite_scores if s >= self.thresholds['composite_threshold'])
             print(f"  Above threshold: {above_threshold}/{len(all_composite_scores)} ({above_threshold/len(all_composite_scores)*100:.1f}%)")
-        # ============ END DEBUG ============
         return relationships
     def cosine_similarity_names(self, col1, col2):
         from sklearn.feature_extraction.text import TfidfVectorizer
         from sklearn.metrics.pairwise import cosine_similarity
         vectorizer=TfidfVectorizer(analyzer='char', ngram_range=(2,3))
-        #Using a model's tokenizer, not sure if the semantic benefits are justified against the computational overhead
-        #col1_tokens=self.tokenizer(col1, return_tensors='pt', padding=True)
-        #col2_tokens=self.tokenizer(col2, return_tensors='pt', padding=True)
-        # with torch.no_grad():
-        #     col1_embeds=self.model.get_input_embeddings()(col1_tokens['input_ids']).mean(dim=1) #we are taking a mean of this value, why?
-        #     col2_embeds=self.model.get_input_embeddings()(col2_tokens['input_ids']).mean(dim=1)
         vectors=vectorizer.fit_transform([col1, col2])
         return cosine_similarity(vectors[0], vectors[1])[0][0]
-    
+
     def cosine_similarity_values(self, series1, series2):
         if pd.api.types.is_numeric_dtype(series1) and pd.api.types.is_numeric_dtype(series2):
             #numerical
@@ -357,7 +320,7 @@ class RelationshipGenerator:
             dot_product=np.dot(v1,v2)
             norm1,norm2=np.linalg.norm(v1), np.linalg.norm(v2)
             return dot_product/(norm1*norm2) if norm1>0 and norm2>0 else 0
-        
+
     def sampled_jaccard_similarity(self, series1, series2):
         unique1=set(series1.dropna().unique())
         unique2=set(series2.dropna().unique())
@@ -368,7 +331,7 @@ class RelationshipGenerator:
         intersection=len(unique1&unique2)
         union=len(unique1|unique2)
         return intersection/union if union>0 else 0
-    
+
     def cardinality_similarity(self, series1, series2):
         card1,card2=series1.nunique(),series2.nunique()
         max_card=max(card1,card2)
@@ -411,7 +374,7 @@ class RelationshipGenerator:
         #Check for cardinality ratio: s1.unique > s2.unique for FK reln
         cardinality_ratio=len(s1_unique)/max(len(s2_unique), 1)
         #Boost score if ID patterns
-        col1_name=str(series1.name).lower() if series1.name else "" #is series1.name valid call?
+        col1_name=str(series1.name).lower() if series1.name else ""
         col2_name=str(series2.name).lower() if series2.name else ""
         name_boost=1.0
         if ('id' in col1_name and 'id' in col2_name) or (col1_name.endswith('_id') or col2_name.endswith('_id')):
@@ -419,7 +382,7 @@ class RelationshipGenerator:
         #FK Score: High containment + good cardinality ratio
         if containment_ratio>0.7 and cardinality_ratio>1.5:
             return min(1.0, containment_ratio*min(cardinality_ratio/10, 1.0)*name_boost)
-        return containment_ratio*0.3 #partial credit for some containment
+        return containment_ratio*0.3
     def detect_hierarchical_pattern(self, series1, series2):
         if not (pd.api.types.is_string_dtype(series1) or pd.api.types.is_object_dtype(series1)) or not (pd.api.types.is_string_dtype(series2) or pd.api.types.is_object_dtype(series2)):
             return 0.0
@@ -442,13 +405,13 @@ class RelationshipGenerator:
         card1, card2 = series1.nunique(), series2.nunique()
         heirarchy_score=0.0
         if card1<card2 and card1>0:
-            heirarchy_score=min(card2/card1, 10)/10 #Cap at reasonable ratio
+            heirarchy_score=min(card2/card1, 10)/10
         elif card2<card1 and card2>0:
             heirarchy_score=min(card1/card2, 10)/10
         return max(s1_substring_score, s2_substring_score)*0.7 + heirarchy_score*0.3
     def detect_functional_dependency(self, series1, series2):
         df_temp=pd.DataFrame({'s1':series1, 's2':series2}).dropna()
-        if len(df_temp)<5: #Min requirement for analysis
+        if len(df_temp)<5:
             return 0.0
         try:
             grouped=df_temp.groupby('s1')['s2'].nunique()
@@ -480,12 +443,8 @@ class RelationshipGenerator:
         try:
             #Check aggregation potential
             grouped_stats=df_temp.groupby('dimension')['measure'].agg(['count', 'std', 'mean'])
-            if len(grouped_stats)<2: #Need multiple groups
+            if len(grouped_stats)<2:
                 return 0.0
-            #General Direction: Good measure-dimension pairs will have
-            #1. Multiple records per dimension value(aggregatable)
-            #2. Variation in measures across dimensions
-            #3. Reasonable number of dimension categories
             avg_count_per_group=grouped_stats['count'].mean()
             std_of_means=grouped_stats['mean'].std()
             overall_std=df_temp['measure'].std()
@@ -500,7 +459,7 @@ class RelationshipGenerator:
         s1_datetime=pd.api.types.is_datetime64_any_dtype(series1)
         s2_datetime=pd.api.types.is_datetime64_any_dtype(series2)
 
-        
+
         if not s1_datetime and pd.api.types.is_object_dtype(series1):
             try:
                 import warnings
@@ -542,7 +501,7 @@ class RelationshipGenerator:
             time_diffs=(df_temp['dt2']-df_temp['dt1']).dt.total_seconds()
             consistent_gap=time_diffs.std()/(time_diffs.mean() + 1e-10) if len(time_diffs)>1 else 1
             #Combine corr and consistency
-            temporal_score=abs(correlation)*0.7+(1/(1+consistent_gap))*0.3 #on that sigmoid type shi
+            temporal_score=abs(correlation)*0.7+(1/(1+consistent_gap))*0.3
             return min(temporal_score, 1.0)
         except Exception:
             return 0.0
@@ -560,12 +519,16 @@ class RelationshipGenerator:
             return abs(correlation)*0.8
         except Exception:
             return 0.0
-    
+
     def _compute_composite_score(self,edge_features):
         weights=self.thresholds['weights']
         return sum(edge_features[metric]*weights.get(metric, 0.0) for metric in edge_features if metric in weights)
-    
-class SemanticLabelGenerator: #Will require serious rework
+
+# ============================================================================
+# SEMANTIC LABEL GENERATOR (For Question Generation)
+# ============================================================================
+
+class SemanticLabelGenerator:
     def __init__(self):
         self.semantic_ontology=self._create_semantic_ontology()
     def generate_feature_label(self, edge_features):
@@ -573,164 +536,116 @@ class SemanticLabelGenerator: #Will require serious rework
         Rule-based semantic classification using decision tree.
         Priority order: JOIN → TEMPORAL → AGGREGATION → DERIVATION → STRUCTURAL → FALLBACK
         """
-         # ============ DEBUG: Log feature scores ============
-        if not hasattr(self, '_debug_counter'):
-            self._debug_counter = 0
-        self._debug_counter += 1
-        
-        # Log 1% of edges to avoid spam
-        if self._debug_counter % 100 == 1:
-            print(f"\n[DEBUG Edge #{self._debug_counter}]")
-            print(f"  id_reference:          {edge_features.get('id_reference', 0.0):.3f}")
-            print(f"  hierarchical:          {edge_features.get('hierarchical', 0.0):.3f}")
-            print(f"  functional_dependency: {edge_features.get('functional_dependency', 0.0):.3f}")
-            print(f"  measure_dimension:     {edge_features.get('measure_dimension', 0.0):.3f}")
-            print(f"  temporal_dependency:   {edge_features.get('temporal_dependency', 0.0):.3f}")
-            print(f"  value_similarity:      {edge_features.get('value_similarity', 0.0):.3f}")
-            print(f"  jaccard_overlap:       {edge_features.get('jaccard_overlap', 0.0):.3f}")
-            print(f"  dtype_similarity:      {edge_features.get('dtype_similarity', 0.0):.3f}")
-        # ============ END DEBUG ============
         # Extract semantic features
         id_ref = edge_features.get('id_reference', 0.0)
         hier = edge_features.get('hierarchical', 0.0)
         func_dep = edge_features.get('functional_dependency', 0.0)
         meas_dim = edge_features.get('measure_dimension', 0.0)
         temp_dep = edge_features.get('temporal_dependency', 0.0)
-        
+
         # Extract statistical features (supporting evidence)
         val_sim = edge_features.get('value_similarity', 0.0)
         jac_sim = edge_features.get('jaccard_overlap', 0.0)
         dtype_sim = edge_features.get('dtype_similarity', 0.0)
         card_sim = edge_features.get('cardinality_similarity', 0.0)
         name_sim = edge_features.get('name_similarity', 0.0)
-        
+
         # ==================== PRIORITY 1: JOIN RELATIONSHIPS ====================
-        # Primary Foreign Key: Strong ID reference + functional dependency
         if id_ref > 0.7 and func_dep > 0.7:
             return "PRIMARY_FOREIGN_KEY"
-        
-        # Foreign Key Candidate: Moderate ID reference
+
         if id_ref > 0.5 and func_dep > 0.5:
             return "FOREIGN_KEY_CANDIDATE"
-        
-        # Reverse Foreign Key: High containment but reversed cardinality
+
         if id_ref > 0.6 and card_sim < 0.3:
             return "REVERSE_FOREIGN_KEY"
-        
-        # Natural Join: High overlap with same type
+
         if jac_sim > 0.7 and dtype_sim == 1.0 and val_sim > 0.5:
             return "NATURAL_JOIN_CANDIDATE"
-        
-        # Weak Join: Some overlap with compatible types
+
         if jac_sim > 0.4 and dtype_sim > 0.7:
             return "WEAK_JOIN_CANDIDATE"
-        
-        # Cross Table Reference: Moderate ID reference, different types
+
         if id_ref > 0.4 and dtype_sim < 0.5:
             return "CROSS_TABLE_REFERENCE"
-        
-        # Many-to-Many: High overlap but low functional dependency
+
         if jac_sim > 0.6 and func_dep < 0.3:
             return "MANY_TO_MANY_REFERENCE"
-        
-        # Self-Referential: High ID reference with moderate functional dependency
+
         if id_ref > 0.5 and func_dep > 0.3 and func_dep < 0.7:
             return "SELF_REFERENTIAL_KEY"
-        
+
         # ==================== PRIORITY 2: TEMPORAL RELATIONSHIPS ====================
-        # Strong Temporal Sequence
         if temp_dep > 0.7:
             return "TEMPORAL_SEQUENCE_STRONG"
-        
-        # Weak Temporal Sequence
+
         if temp_dep > 0.4:
             return "TEMPORAL_SEQUENCE_WEAK"
-        
-        # Temporal Correlation: Moderate temporal + value correlation
+
         if temp_dep > 0.3 and val_sim > 0.5:
             return "TEMPORAL_CORRELATION"
-        
+
         # ==================== PRIORITY 3: AGGREGATION RELATIONSHIPS ====================
-        # Strong Measure-Dimension
         if meas_dim > 0.7:
             return "MEASURE_DIMENSION_STRONG"
-        
-        # Dimension Hierarchy: Hierarchical + measure pattern
+
         if hier > 0.5 and meas_dim > 0.4:
             return "DIMENSION_HIERARCHY"
-        
-        # Weak Measure-Dimension
+
         if meas_dim > 0.4:
             return "MEASURE_DIMENSION_WEAK"
-        
-        # Fact-Dimension: Measure pattern with high cardinality difference
+
         if meas_dim > 0.3 and card_sim < 0.2:
             return "FACT_DIMENSION"
-        
-        # Natural Grouping: Moderate measure-dimension without hierarchy
+
         if meas_dim > 0.3 and hier < 0.3:
             return "NATURAL_GROUPING"
-        
-        # Nested Aggregation: Hierarchical + measure-dimension
+
         if hier > 0.4 and meas_dim > 0.3:
             return "NESTED_AGGREGATION"
-        
-        # Pivot Candidate: Low cardinality categorical with numeric
+
         if meas_dim > 0.2 and card_sim < 0.15:
             return "PIVOT_CANDIDATE"
-        
+
         # ==================== PRIORITY 4: DERIVATION RELATIONSHIPS ====================
-        # Redundant Column: Very high similarity
         if val_sim > 0.9 and jac_sim > 0.8:
             return "REDUNDANT_COLUMN"
-        
-        # Functional Transformation: High functional dependency, low overlap
+
         if func_dep > 0.8 and val_sim < 0.3:
             return "FUNCTIONAL_TRANSFORMATION"
-        
-        # Derived Calculation: High similarity, different names
+
         if val_sim > 0.7 and name_sim < 0.3:
             return "DERIVED_CALCULATION"
-        
-        # Aggregated Derivation: Hierarchical + functional dependency
+
         if hier > 0.5 and func_dep > 0.5:
             return "AGGREGATED_DERIVATION"
-        
-        # Normalized Variant: High value similarity with same dtype
+
         if val_sim > 0.8 and dtype_sim == 1.0:
             return "NORMALIZED_VARIANT"
-        
-        # Synonym Column: High name similarity
+
         if name_sim > 0.7 and jac_sim > 0.3:
             return "SYNONYM_COLUMN"
-        
+
         # ==================== PRIORITY 5: STRUCTURAL RELATIONSHIPS ====================
-        # Composite Key Component: High uniqueness patterns
         if func_dep > 0.6 and id_ref > 0.3:
             return "COMPOSITE_KEY_COMPONENT"
-        
-        # Partition Key: Low cardinality, moderate functional dependency
+
         if card_sim < 0.15 and func_dep > 0.4:
             return "PARTITION_KEY"
-        
-        # Index Candidate: High uniqueness potential
+
         if func_dep > 0.5 and jac_sim < 0.4:
             return "INDEX_CANDIDATE"
-        
-        # Audit Relationship: Temporal without correlation
+
         if temp_dep > 0.2 and val_sim < 0.3:
             return "AUDIT_RELATIONSHIP"
-        
-        # Version Tracking: Sequential + temporal
+
         if temp_dep > 0.2 and func_dep > 0.3:
             return "VERSION_TRACKING"
-        
+
         # ==================== PRIORITY 6: FALLBACK ====================
-        # Weak Correlation: Some statistical signal
         if val_sim > 0.5 or jac_sim > 0.4:
             return "WEAK_CORRELATION"
-        
-        # Ambiguous: Conflicting signals (multiple moderate features)
+
         moderate_features = sum([
             id_ref > 0.3,
             hier > 0.3,
@@ -740,142 +655,68 @@ class SemanticLabelGenerator: #Will require serious rework
         ])
         if moderate_features >= 3:
             return "AMBIGUOUS_RELATIONSHIP"
-        
-        # Independent: No clear pattern
+
         return "INDEPENDENT_COLUMNS"
 
     def get_semantic_interpretation(self, feature_label):
         return self.semantic_ontology.get(feature_label, "UNKNOWN_RELATIONSHIP")
-    def _create_semantic_ontology(self):    #EXTREMELY IMPORTANT, EVERYTHING HINGES ON THESE DEFINITIONS, HEART OF SEMANTIC EMERGENCE
+    def _create_semantic_ontology(self):
         return {
                     # ==================== CATEGORY 1: JOIN RELATIONSHIPS (8) ====================
-        # Foreign Key Patterns
         "PRIMARY_FOREIGN_KEY": "Strong foreign key relationship - PRIMARY JOIN candidate with high containment and functional dependency",
         "FOREIGN_KEY_CANDIDATE": "Likely foreign key relationship - NATURAL JOIN candidate with moderate ID reference pattern",
         "REVERSE_FOREIGN_KEY": "Reverse foreign key pattern - JOIN possible but reversed cardinality",
-        
-        # Join Support Patterns
+
         "NATURAL_JOIN_CANDIDATE": "High value overlap with same data type - NATURAL JOIN or USING clause candidate",
         "WEAK_JOIN_CANDIDATE": "Some value overlap with compatible types - Possible JOIN with ON condition",
         "CROSS_TABLE_REFERENCE": "Moderate reference pattern across different types - Complex JOIN candidate",
         "MANY_TO_MANY_REFERENCE": "Low functional dependency with high overlap - Junction table pattern",
         "SELF_REFERENTIAL_KEY": "High ID reference within related context - Hierarchical self-JOIN pattern",
-        
+
         # ==================== CATEGORY 2: AGGREGATION RELATIONSHIPS (7) ====================
-        # Measure-Dimension Patterns
         "MEASURE_DIMENSION_STRONG": "Strong measure-dimension relationship - PRIMARY GROUP BY with aggregation target",
         "MEASURE_DIMENSION_WEAK": "Moderate measure-dimension relationship - Secondary GROUP BY candidate",
         "DIMENSION_HIERARCHY": "Hierarchical categorical relationship - Nested GROUP BY or ROLLUP candidate",
         "FACT_DIMENSION": "Fact-dimension pattern - Star schema relationship for aggregation queries",
-        
-        # Grouping Patterns
+
         "NATURAL_GROUPING": "Natural grouping pattern - Direct GROUP BY relationship",
         "NESTED_AGGREGATION": "Hierarchical with measure pattern - Multi-level GROUP BY with aggregations",
         "PIVOT_CANDIDATE": "Low cardinality categorical with numeric - PIVOT or CASE aggregation candidate",
-        
+
         # ==================== CATEGORY 3: ORDERING RELATIONSHIPS (5) ====================
-        # Temporal Ordering
         "TEMPORAL_SEQUENCE_STRONG": "Strong temporal correlation - PRIMARY ORDER BY candidate for time-series",
         "TEMPORAL_SEQUENCE_WEAK": "Moderate temporal correlation - Secondary ORDER BY or time-based filtering",
         "TEMPORAL_CORRELATION": "Datetime columns with correlation - Time-based JOIN or ORDER BY candidate",
-        
-        # Sequential Ordering
+
         "SEQUENTIAL_ORDERING": "Numeric sequence correlation - ORDER BY candidate for ranked queries",
         "RANKED_RELATIONSHIP": "Ordinal pattern detected - RANK or ROW_NUMBER partitioning candidate",
-        
+
         # ==================== CATEGORY 4: DERIVATION RELATIONSHIPS (6) ====================
-        # Calculated Columns
         "DERIVED_CALCULATION": "High similarity with different names - One column likely calculated from other",
         "FUNCTIONAL_TRANSFORMATION": "Strong functional dependency without overlap - Mathematical or string transformation",
         "AGGREGATED_DERIVATION": "Parent-child with aggregation pattern - Derived aggregate or summary column",
-        
-        # Data Quality / Redundancy
+
         "REDUNDANT_COLUMN": "Nearly identical content - Candidate for deduplication or normalization",
         "NORMALIZED_VARIANT": "Same semantic content, different encoding - Normalization or standardization variant",
         "SYNONYM_COLUMN": "High name similarity with compatible content - Potential synonym or alias column",
-        
+
         # ==================== CATEGORY 5: STRUCTURAL RELATIONSHIPS (5) ====================
-        # Schema Structure
         "COMPOSITE_KEY_COMPONENT": "Part of composite key pattern - Multi-column uniqueness constraint",
         "PARTITION_KEY": "Low cardinality with high coverage - Table partitioning candidate",
         "INDEX_CANDIDATE": "High uniqueness with filtering potential - Index creation candidate",
-        
-        # Metadata Relationships
+
         "AUDIT_RELATIONSHIP": "Temporal with low correlation - Audit trail or timestamp tracking",
         "VERSION_TRACKING": "Sequential with temporal patterns - Version control or change tracking",
-        
+
         # ==================== CATEGORY 6: WEAK/UNKNOWN (3) ====================
         "WEAK_CORRELATION": "Some statistical correlation without clear semantic pattern",
         "INDEPENDENT_COLUMNS": "No clear relationship detected - Likely unrelated columns",
         "AMBIGUOUS_RELATIONSHIP": "Conflicting semantic signals - Requires manual review"
         }
-    
-class FeatureTokenizer:
-    def __init__(self, model_manager):
-        self.model_manager=model_manager
-        self.model=model_manager.model
-        self.tokenizer=model_manager.tokenizer
-        self.device=model_manager.device
-        self.separator=" || "
-    def tokenize_column_stats(self,stats_dict):
-        column_text=self._stats_to_text(stats_dict)
-        tokens=self._tokenize_text(column_text)
-        embeddings=self._create_embeddings(tokens)
-        return embeddings
-    def tokenize_semantic_label(self, label_string):
-        text=f"relationship_type: {label_string}"
-        tokens=self._tokenize_text(text)
-        return self._create_embeddings(tokens)
-    def _stats_to_text(self,stats_dict):
-        inner_stats=list(stats_dict.values())[0]
-        text_parts=[f"{k}:{v}" for k,v in inner_stats.items()]
-        return self.separator.join(text_parts)
-    def _tokenize_text(self,text):
-        tokens=self.tokenizer(
-            text,
-            padding=True,
-            return_tensors='pt'
-        )
-        tokens={k:v.to(self.device) for k,v in tokens.items()}
-        return tokens
-    def _create_embeddings(self, tokens):
-        with torch.no_grad():
-            embeddings=self.model.get_input_embeddings()(tokens['input_ids'])
-        return embeddings
-    def _pad_feature_list(self, feature_list):
-        #have to pad them anyway
-        if not feature_list:
-            return torch.empty(0)
-        max_length=max(features.shape[1] for features in feature_list)
-        embedding_dim=self.model.get_input_embeddings().embedding_dim
-        padded_features=[]
-        for features in feature_list:
-            current_length=features.shape[1]
-            if current_length<max_length:
-                padding=torch.zeros(1,
-                                    max_length-current_length,
-                                    embedding_dim,
-                                    device=self.device)
-                padded=torch.cat([features,padding], dim=1)
-            else:
-                padded=features
-            padded_features.append(padded.squeeze(0))
-        return torch.stack(padded_features)
-    def batch_tokenize_columns(self, df, stats_extractor):
-        feature_list=[]
-        for col in df.columns:
-            col_stats=stats_extractor.get_col_stats(df,col)
-            embeddings=self.tokenize_column_stats(col_stats)
-            feature_list.append(embeddings)
-        return self._pad_feature_list(feature_list)
-    def batch_tokenize_semantic_labels(self, label_list):
-        if not label_list:
-            return torch.empty(0)
-        label_embeddings=[]
-        for label in label_list:
-            embedding=self.tokenize_semantic_label(label)
-            label_embeddings.append(embedding)
-        return self._pad_feature_list(label_embeddings)
+
+# ============================================================================
+# NODE EMBEDDING GENERATION
+# ============================================================================
 
 class LightweightFeatureTokenizer:
     def __init__(self, embedding_strategy='hybrid'):
@@ -895,7 +736,7 @@ class LightweightFeatureTokenizer:
         inner_content=list(content_dict.values())[0]
         content_text=inner_content['column_content']
         dtype=inner_content['data_type']
-        sample_size=int(inner_content['sample_size']) # column header is not explicitly being stored
+        sample_size=int(inner_content['sample_size'])
         embeddings=[]
         if self.semantic_encoder:
             semantic_embed=self.semantic_encoder.encode(content_text)
@@ -906,12 +747,10 @@ class LightweightFeatureTokenizer:
                 embeddings.append(statistical_embed)
         metadata_features=self._engineer_metadata_features(dtype, sample_size, content_text)
         embeddings.append(metadata_features)
-        # Concatenate all embeddings
         if embeddings:
             full_embedding=np.concatenate(embeddings)
         else:
-            full_embedding=np.zeros(8)  # Fallback to metadata size
-        # Pad or truncate to target dimension (512)
+            full_embedding=np.zeros(8)
         if len(full_embedding) < self.feature_dim:
             padding=np.zeros(self.feature_dim - len(full_embedding))
             return np.concatenate([full_embedding, padding])
@@ -922,42 +761,50 @@ class LightweightFeatureTokenizer:
             1.0 if 'int' in dtype else 0.0,
             1.0 if 'float' in dtype else 0.0,
             1.0 if 'object' in dtype else 0.0,
-            sample_size/100.0, #Normalised sample size
-            content_text.count('<NULL>')/sample_size, #Null ratio
-            len(content_text)/1000.0, #Content length
-            content_text.count('|')/sample_size, #Value diversity
-            1.0 if any(c.isdigit() for c in content_text) else 0.0, #Contains numbers
+            sample_size/100.0,
+            content_text.count('<NULL>')/sample_size,
+            len(content_text)/1000.0,
+            content_text.count('|')/sample_size,
+            1.0 if any(c.isdigit() for c in content_text) else 0.0,
         ]
         return np.array(features)
-    
+
+# ============================================================================
+# GRAPH CONSTRUCTION
+# ============================================================================
+
 class GraphBuilder:
-    def __init__(self, content_extractor, feature_tokenizer, relationship_generator, semantic_label_generator, mode='train'):
+    """
+    IMPORTANT: This is the same GraphBuilder from table2graph_sem.py, but
+    modified for contrastive learning. In the original version,
+    _create_supervised_edges returns edge_labels (class indices). For contrastive
+    learning, we need to store edge_features (the 10 computed features) instead.
+
+    Question for user: Should I modify _create_supervised_edges now to return
+    edge_features instead of edge_labels, or keep it as-is for now?
+    """
+    def __init__(self, content_extractor, feature_tokenizer, relationship_generator, semantic_label_generator=None, mode='train'):
         self.content_extractor=content_extractor
         self.feature_tokenizer=feature_tokenizer
         self.relationship_generator=relationship_generator
         self.semantic_label_generator=semantic_label_generator
         self.mode=mode
-        #Classification Setup
-        self.label_to_index=self._create_label_mapping()
-        self.index_to_label={v:k for k,v in self.label_to_index.items()}
-        self.num_classes=len(self.label_to_index)
-    def _create_label_mapping(self):
-        ontology=self.semantic_label_generator.semantic_ontology
-        return {label: idx for idx, label in enumerate(ontology.keys())}
+
     def build_graph(self, df):
-        #Main Orchestration Method, returns torch_geometric data object for GNN processing
-        #1: Create embedded nodes for columns
+        """Main orchestration method - returns torch_geometric Data object"""
         node_features, node_mapping=self._create_embedded_nodes(df)
         if self.mode=='train':
-            edge_index, edge_labels=self._create_supervised_edges(df, node_mapping)
-        else: #Test Mode
+            # For contrastive learning, we only need edges for sparse graph construction
+            edge_index=self._create_sparse_edges(df, node_mapping)
+        else:
             edge_index=self._create_candidate_edges(df, node_mapping)
-            edge_labels=None #Will be predicted
-        return self._to_pytorch_geometric(node_features, edge_index, edge_labels)
+        return self._to_pytorch_geometric(node_features, edge_index)
+
     def _create_embedded_nodes(self, df):
+        """Creates 512-d node embeddings for each column"""
         node_features=[]
-        node_mapping={} #column_name -> node_index
-        # Collect all content for TF-IDF fitting if needed
+        node_mapping={}
+        # Fit TF-IDF vectorizer if needed
         if self.feature_tokenizer.vectorizer and not hasattr(self.feature_tokenizer.vectorizer, 'vocabulary_'):
             all_content=[]
             for col in df.columns:
@@ -965,300 +812,91 @@ class GraphBuilder:
                 inner_content=list(content_dict.values())[0]
                 all_content.append(inner_content['column_content'])
             self.feature_tokenizer.vectorizer.fit(all_content)
-        # Now encode each column (encode_column_content handles padding to 512 dims)
+        # Encode each column
         for idx, col in enumerate(df.columns):
             content_dict=self.content_extractor.get_col_stats(df, col)
             embedding=self.feature_tokenizer.encode_column_content(content_dict)
             node_features.append(embedding)
             node_mapping[col]=idx
         return torch.stack([torch.tensor(f, dtype=torch.float32) for f in node_features]), node_mapping
-    def _create_supervised_edges(self, df, node_mapping):
-        #Creating edges with ground truth labels for supervision
-        relationships=self.relationship_generator.compute_labeled_relationships(df, self.semantic_label_generator)
-        edge_index=[]
-        edge_labels=[]
-        for rel in relationships:
-            #Sparse Connectivity to avoid emulating a MLP cosplaying as a graph
-            if self._passes_threshold(rel):
-                src_idx=node_mapping[rel['col1']]
-                dst_idx=node_mapping[rel['col2']]
-                #Undirected Edges: Add both directions
-                edge_index.extend([[src_idx, dst_idx], [dst_idx, src_idx]])
-                #Convert Semantic Label to classification index
-                label_idx=self.label_to_index[rel['feature_label']]
-                edge_labels.extend([label_idx, label_idx])
-        # Handle empty edge list
-        if not edge_index:
-            return torch.empty((2,0), dtype=torch.long), torch.empty(0, dtype=torch.long)
-        return torch.tensor(edge_index).T, torch.tensor(edge_labels, dtype=torch.long)
-    def _create_candidate_edges(self, df, node_mapping):
-        #Create candidate edges for predictions
+
+    def _create_sparse_edges(self, df, node_mapping):
+        """Creates sparse graph based on composite threshold filtering"""
         relationships=self.relationship_generator.compute_all_relationship_scores(df)
         edge_index=[]
         for rel in relationships:
-            #Same threshold logic as training
+            # Only add edges above composite threshold
+            if rel.get('composite_score', 0)>=self.relationship_generator.thresholds['composite_threshold']:
+                src_idx=node_mapping[rel['col1']]
+                dst_idx=node_mapping[rel['col2']]
+                # Undirected edges
+                edge_index.extend([[src_idx, dst_idx], [dst_idx, src_idx]])
+        if not edge_index:
+            return torch.empty((2,0), dtype=torch.long)
+        return torch.tensor(edge_index).T
+
+    def _create_candidate_edges(self, df, node_mapping):
+        """Creates candidate edges for test/inference"""
+        relationships=self.relationship_generator.compute_all_relationship_scores(df)
+        edge_index=[]
+        for rel in relationships:
             src_idx=node_mapping[rel['col1']]
             dst_idx=node_mapping[rel['col2']]
-            #Undirected edges
             edge_index.extend([[src_idx, dst_idx], [dst_idx, src_idx]])
         return torch.tensor(edge_index).T if edge_index else torch.empty((2,0), dtype=torch.long)
-    def _passes_threshold(self, relationship):
-        return relationship.get('composite_score', 0)>=self.relationship_generator.thresholds['composite_threshold']
-    def _to_pytorch_geometric(self, node_features, edge_index, edge_labels=None):
-        data=Data(x=node_features, edge_index=edge_index)
-        if edge_labels is not None:
-            data.edge_attr=edge_labels
-        return data
-class GNNEdgePredictor(torch.nn.Module):
-    #3 Layer GNN to capture direct + transitive relationships
-    #Edge prediction via node embedding concatenation
-    #Separate Classifier Head
-    #Built-in training and test steps
-    def __init__(self, node_dim, hidden_dim=256, num_classes=18, num_layers=1, dropout=0.1): #Keeping layers to 1
-        super().__init__()
-        #3-hop GNN
-        self.gnn=TableGCN(
-            input_dim=node_dim,
-            hidden_dim=hidden_dim,
-            output_dim=hidden_dim,
-            num_layers=num_layers
-        )
-        #Edge Classifier: Concatenated Node Embeds -> Edge Labels
-        self.edge_classifier=torch.nn.Sequential(torch.nn.Linear(hidden_dim*2, hidden_dim),
-                                                 torch.nn.ReLU(),
-                                                 torch.nn.Dropout(dropout),
-                                                 torch.nn.Linear(hidden_dim, hidden_dim//2),
-                                                 torch.nn.ReLU(),
-                                                 torch.nn.Dropout(dropout),
-                                                 torch.nn.Linear(hidden_dim//2, num_classes)
-                                                 )
-        self.criterion=torch.nn.CrossEntropyLoss() #Will be updated with weights later
-        self.optimizer=torch.optim.Adam(self.parameters(), lr=0.001) #Tweak Tweak
-    def set_class_weights(self, weights):
-        self.criterion=torch.nn.CrossEntropyLoss(weight=weights)
-    def forward(self, pyg_data):
-        #Forward Pass: Node Features -> GNN -> Edge Predictions
-        # ---
-        #Update Node Embeds (3-hop)
-        node_embeddings=self.gnn(pyg_data.x, pyg_data.edge_index)
-        #Get source and dest embeds
-        src_embeddings=node_embeddings[pyg_data.edge_index[0]]
-        dst_embeddings=node_embeddings[pyg_data.edge_index[1]]
-        #Concat for edge classification
-        edge_embeddings=torch.cat([src_embeddings, dst_embeddings], dim=1)
-        #Classify edge types
-        edge_logits=self.edge_classifier(edge_embeddings)
-        return edge_logits
-    def train_step(self, pyg_data):
-        self.train()
-        self.optimizer.zero_grad()
-        edge_logits=self.forward(pyg_data)
-        loss=self.criterion(edge_logits, pyg_data.edge_attr)
-        loss.backward()
-        self.optimizer.step()
-        #Calculate accuracy for monitoring
-        predictions=torch.argmax(edge_logits, dim=1)
-        accuracy=(predictions==pyg_data.edge_attr).float().mean() #Pooling!!
-        return loss.item(), accuracy.item()
-    def predict(self, pyg_data):
-        self.eval()
-        with torch.no_grad():
-            edge_logits=self.forward(pyg_data)
-            predictions=torch.argmax(edge_logits, dim=1)
-            confidences=torch.softmax(edge_logits, dim=1)
-            max_confidences=torch.max(confidences, dim=1)[0]
-        return predictions, max_confidences
-class Table2GraphPipeline:
-    def __init__(self, embedding_strategy='hybrid'):
-        self.content_extractor=ColumnContentExtractor()
-        self.feature_tokenizer=LightweightFeatureTokenizer(embedding_strategy)
-        self.relationship_generator=None #We keep this None for the classification task, maybe later when we move to more complex architectures which capture relationality we can think about embedding similarity
-        self.semantic_label_generator=SemanticLabelGenerator()
-        #Graph Builders
-        self.train_builder=None
-        self.test_builder=None
-        self.predictor=None
-    def initialize_for_training(self, node_dim=512, training_tables=None):
-        #Init RelationshipGenerator if needed
-        if self.relationship_generator is None:
-            self.relationship_generator=RelationshipGenerator(threshold_config={
-                'composite_threshold':0.15,
-                'weights': {
-                    'name_similarity':0.10,
-                    'value_similarity':0.15,
-                    'jaccard_overlap':0.1,
-                    'cardinality_similarity':0.05,
-                    'dtype_similarity':0.05,
-                    #Semantic Features
-                    'id_reference':0.15,
-                    'hierarchical':0.10,
-                    'functional_dependency':0.10,
-                    'measure_dimension':0.10,
-                    'temporal_dependency':0.10
-                }
-            })
-        self.train_builder=GraphBuilder(
-            self.content_extractor,
-            self.feature_tokenizer,
-            self.relationship_generator,
-            self.semantic_label_generator,
-            mode='train'
-        )
-        self.predictor=GNNEdgePredictor(
-            node_dim=node_dim,
-            hidden_dim=256,
-            num_classes=self.train_builder.num_classes,
-            num_layers=1
-        )
 
-        # Only compute class weights if training tables provided
-        if training_tables is not None:
-            print("\nComputing class weights to mitigate class imbalance...")
-            label_counts= {label:0 for label in self.train_builder.label_to_index.keys()}
+    def _to_pytorch_geometric(self, node_features, edge_index):
+        """Converts to PyTorch Geometric Data object"""
+        return Data(x=node_features, edge_index=edge_index)
 
-            #Count label occurrences across training data
-            for df in training_tables:
-                relationships=self.relationship_generator.compute_labeled_relationships(df, self.semantic_label_generator)
-                for rel in relationships:
-                    if rel.get('composite_score', 0)>=self.relationship_generator.thresholds['composite_threshold']:
-                        label_counts[rel['feature_label']]+=1
+# ============================================================================
+# TODO: COMPONENTS TO BE ADDED NEXT
+# ============================================================================
 
-            #Compute inverse frequency weights
-            total_samples=sum(label_counts.values())
+"""
+The following components need to be implemented for contrastive learning:
 
-            # Check if we got any samples
-            print(f"DEBUG: total_samples = {total_samples}")  # DEBUG LINE - REMOVE AFTER TESTING
-            if total_samples == 0:
-                print("⚠ Warning: No edges found in training data - using uniform class weights")
-            else:
-                class_weights=[]
-                for label in self.train_builder.index_to_label.values():
-                    count=max(label_counts.get(label, 0), 1)  # Ensure count is never 0
-                    weight=total_samples/(len(label_counts)*count)
-                    class_weights.append(weight)
+1. QuestionEncoder (~50 lines)
+   - Encodes natural language questions into 768-d embeddings
+   - Uses sentence-transformers or similar
+   - Input: question string
+   - Output: 768-d tensor
 
-                #Pass weights to predictor
-                self.predictor.set_class_weights(torch.tensor(class_weights, dtype=torch.float32))
-                print(f"✓ Class weights computed for {len(class_weights)} labels")
+2. ContrastiveGNNEncoder (~150 lines)
+   - TableGCN for node embedding enrichment (reuse from gcn_conv.py)
+   - Attention pooling for graph-level embeddings
+   - Projection head to map to question space (512->768)
+   - Input: PyG Data object
+   - Output: 768-d graph embedding
 
-                # Print top 5 most common labels for debugging
-                top_labels = sorted(label_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-                print("  Top 5 most common labels:")
-                for label, count in top_labels:
-                    print(f"    {label}: {count} ({count/total_samples*100:.1f}%)")
-        else:
-            print("\n⚠ Warning: No training tables provided - using uniform class weights")
-    def initialize_for_testing(self):
-        self.test_builder=GraphBuilder(
-            self.content_extractor,
-            self.feature_tokenizer,
-            self.relationship_generator,
-            self.semantic_label_generator,
-            mode='test'
-        )
-    def train_epoch(self, table_dataframes):
-        #Train on multiple tables for each epoch
-        total_loss=0
-        total_accuracy=0
-        num_batches=0
-        for df in table_dataframes:
-            try:
-                pyg_data=self.train_builder.build_graph(df)
-                if pyg_data.edge_index.size(1)>0:
-                    loss, accuracy = self.predictor.train_step(pyg_data)
-                    total_loss+=loss
-                    total_accuracy+=accuracy
-                    num_batches+=1
-            except Exception as e:
-                print(f"Warning: Skipped Table due to error {e}")
-        avg_loss=total_loss/max(num_batches, 1)
-        avg_accuracy=total_accuracy/max(num_batches, 1)
-        return avg_loss, avg_accuracy
-    def predict_relationships(self, df):
-        pyg_data=self.test_builder.build_graph(df)
-        if pyg_data.edge_index.size(1)==0:
-            return [] #No candidate edges
-        predictions, confidences=self.predictor.predict(pyg_data)
-        #Convert back to semantic labels ??
-        results=[]
-        columns=list(df.columns)
-        #Process Edges
-        processed_pairs=set()
-        for i, (src_idx, dst_idx) in enumerate(pyg_data.edge_index.T):
-            src_col=columns[src_idx.item()]
-            dst_col=columns[dst_idx.item()]
-            #Skip if already processed
-            pair_key=tuple(sorted([src_col, dst_col]))
-            if pair_key in processed_pairs:
-                continue
-            processed_pairs.add(pair_key)
-            #Convert Prediction to Semantic Label
-            label_idx=predictions[i].item()
-            confidence=confidences[i].item()
-            semantic_label=self.test_builder.index_to_label[label_idx]
-            results.append({
-                'col1': src_col,
-                'col2':dst_col,
-                'predicted_label':semantic_label,
-                'confidence':confidence,
-                'semantic_meaning':self.semantic_label_generator.get_semantic_interpretation(semantic_label)
-            })
-        return results
+3. InfoNCELoss (~30 lines)
+   - Contrastive loss implementation
+   - Handles in-batch negatives
+   - Temperature scaling parameter
+   - Input: graph embeddings, question embeddings, labels
+   - Output: scalar loss
 
-    def save_model(self, filepath):
-        """Save trained GNN model and associated metadata"""
-        if self.predictor is None:
-            raise ValueError("No trained model to save. Call initialize_for_training first.")
+4. QuestionGenerator (~200 lines)
+   - Generates synthetic questions from table metadata
+   - Uses 34 semantic relationship types as templates
+   - Creates hard negatives
+   - Input: DataFrame, relationships
+   - Output: list of (table, question, label) tuples
 
-        save_dict = {
-            'model_state_dict': self.predictor.state_dict(),
-            'optimizer_state_dict': self.predictor.optimizer.state_dict(),
-            'label_to_index': self.train_builder.label_to_index,
-            'index_to_label': self.train_builder.index_to_label,
-            'num_classes': self.train_builder.num_classes,
-            'node_dim': self.predictor.gnn.layers[0].in_channels,
-            'hidden_dim': self.predictor.gnn.layers[0].out_channels
-        }
-        torch.save(save_dict, filepath)
-        print(f"✓ Model saved to {filepath}")
+5. ContrastiveTrainer (~150 lines)
+   - Training loop for contrastive learning
+   - Batch construction with hard negatives
+   - Evaluation metrics (Recall@K)
+   - Input: dataset, hyperparams
+   - Output: trained model
 
-    def load_model(self, filepath):
-        """Load trained GNN model and associated metadata"""
-        checkpoint = torch.load(filepath)
+6. TableQuestionDataset (~100 lines)
+   - PyTorch Dataset wrapper
+   - Handles table-question pairs
+   - Batch collation
+   - Input: list of (df, question, label)
+   - Output: batched PyG Data + question tensors
 
-        # Initialize test builder with loaded label mappings
-        self.test_builder = GraphBuilder(
-            self.content_extractor,
-            self.feature_tokenizer,
-            self.relationship_generator if self.relationship_generator else RelationshipGenerator(),
-            self.semantic_label_generator,
-            mode='test'
-        )
-        self.test_builder.label_to_index = checkpoint['label_to_index']
-        self.test_builder.index_to_label = checkpoint['index_to_label']
-        self.test_builder.num_classes = checkpoint['num_classes']
-
-        # Recreate predictor with saved architecture
-        self.predictor = GNNEdgePredictor(
-            node_dim=checkpoint['node_dim'],
-            hidden_dim=checkpoint['hidden_dim'],
-            num_classes=checkpoint['num_classes'],
-            num_layers=1
-        )
-
-        # Load trained weights
-        self.predictor.load_state_dict(checkpoint['model_state_dict'])
-        self.predictor.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.predictor.eval()
-
-        print(f"✓ Model loaded from {filepath}")
-        print(f"  Classes: {checkpoint['num_classes']}")
-        print(f"  Architecture: {checkpoint['node_dim']}→{checkpoint['hidden_dim']}→{checkpoint['num_classes']}")
-
-
-#Primary ToDo: Run through the semantic features and infuse an LLM for actual semantic reasoning, the scores are only there for judgement based on scores+table_context+scenario_context
-
-#ToDo -Run through additions, fix TableGCN, figure out running pipeline, data ingestion (also involves data collection)
-
-
-
+Total new code: ~680 lines
+Total reused code: ~1200 lines (60-70% reuse rate)
+"""

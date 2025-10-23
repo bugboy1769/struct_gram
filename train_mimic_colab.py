@@ -130,7 +130,7 @@ print(f"✓ Pipeline initialized")
 print(f"  - Feature tokenizer: LightweightFeatureTokenizer (hybrid)")
 print(f"  - Node dimension: 512")
 print(f"  - Number of semantic labels: {pipeline.train_builder.num_classes}")
-print(f"  - GNN layers: 3 (3-hop message passing)")
+print(f"  - GNN layers: 1 (1-hop message passing)")
 
 # ==================== TRAINING CONFIGURATION ====================
 print("\n" + "=" * 60)
