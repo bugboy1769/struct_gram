@@ -17,6 +17,7 @@ import numpy as np
 from torch_geometric.data import Data
 from gcn_conv import TableGCN
 from pathlib import Path
+from sentence_transformers import SentenceTransformer
 
 PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
 
@@ -848,6 +849,16 @@ class GraphBuilder:
     def _to_pytorch_geometric(self, node_features, edge_index):
         """Converts to PyTorch Geometric Data object"""
         return Data(x=node_features, edge_index=edge_index)
+
+class QuestionEncoder:
+    def __init__(self, model_name, freeze-True):
+        self.encoder=SentenceTransformer(model_name)
+        self.dim=self.encoder.get_sentence_embedding_dimension()
+        self.freeze=freeze
+    def encode(self, question):
+        emb=self.encoder.encode(question, convert_to_tensor=True)
+        return emb.float()
+
 
 # ============================================================================
 # TODO: COMPONENTS TO BE ADDED NEXT

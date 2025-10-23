@@ -4,7 +4,7 @@ import torch
 import pandas as pd
 import numpy as np
 import itertools
-from llm_call import generate_batch_without_decode
+from llm_serving.llm_call import generate_batch_without_decode
 import matplotlib.pyplot as plt
 from torch_geometric.data import Data
 from gcn_conv import TableGCN
