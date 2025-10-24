@@ -773,6 +773,9 @@ class LightweightFeatureTokenizer:
 # ============================================================================
 # GRAPH CONSTRUCTION
 # ============================================================================
+import torch.nn as nn
+import torch.nn.functional as F
+from sentence_transformers import SentenceTransformer
 
 class GraphBuilder:
     """
@@ -850,15 +853,156 @@ class GraphBuilder:
         """Converts to PyTorch Geometric Data object"""
         return Data(x=node_features, edge_index=edge_index)
 
-class QuestionEncoder:
-    def __init__(self, model_name, freeze-True):
+class QuestionEncoder(nn.Module):
+    def __init__(self, model_name='all-mpnet-base-v2', freeze=True):
+        super().__init__()
         self.encoder=SentenceTransformer(model_name)
-        self.dim=self.encoder.get_sentence_embedding_dimension()
+        self.output_dim=self.encoder.get_sentence_embedding_dimension()
         self.freeze=freeze
-    def encode(self, question):
-        emb=self.encoder.encode(question, convert_to_tensor=True)
-        return emb.float()
+        #Freeze Encoder weights if specified
+        if self.freeze:
+            for param in self.encoder.parameters():
+                param.requires_grad=False
+    def forward(self, questions):
+        context=torch.no_grad() if self.freeze else torch.enable_grad()
+        with context:
+            embeddings=self.encoder.encode(
+                questions,
+                convert_to_tensor=True,
+                show_progress_bar=False
+            )
+        return embeddings.float()
+    def encode(self, questions):
+        return self.forward(questions)
 
+# ============================================================================
+# CONTRASTIVE GNN ENCODER
+# ============================================================================
+
+class AttentionPooling(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        #Attention MLP: input_dim -> input_dim//2 -> 1
+        self.attention_mlp=nn.Sequential(
+            nn.Linear(input_dim, input_dim//2),
+            nn.Tanh(),
+            nn.Linear(input_dim//2, 1)
+        )
+    def forward(self, node_embeddings, batch=None):
+        #Compute attention scores for each node
+        attention_scores=self.attention_mlp(node_embeddings)
+        if batch is None:
+            #Single Graph: Softmax over all nodes
+            attention_weights=F.softmax(attention_scores, dim=0)
+            graph_embedding=(attention_weights*node_embeddings).sum(dim=0, keepdim=True)
+        else:
+            #Batched Graphs
+            from torch_geometric.nn import global_add_pool
+            #Initialize weights
+            attention_weights=torch.zeros_like(attention_scores)
+            #Apply softmax per graph
+            for graph_id in batch.unique():
+                mask=(batch==graph_id)
+                attention_weights[mask]=F.softmax(attention_scores[mask], dim=0)
+            #Weighted sum per graph
+            weighted_nodes=attention_weights*node_embeddings
+            graph_embedding=global_add_pool(weighted_nodes, batch)
+        return graph_embedding
+
+class ContrastiveGNNEncoder(nn.Module):
+    """
+    Encodes table graphs into embeddings aligned with question space.
+    
+    Architecture:
+        Table → GNN (2-layer) → Attention Pooling → Projection Head → 768-d embedding
+    
+    Design rationale:
+        - 2-layer GNN: Captures compositional patterns without over-smoothing
+        - Attention pooling: Learns which columns matter for each question
+        - Projection head: Maps graph space (256-d) to question space (768-d)
+        - L2 normalization: Enables cosine similarity for contrastive loss
+    """
+    def __init__(self, node_dim=512, hidden_dim=256, output_dim=768, num_layers=2):
+        super().__init__()
+        #Component 1: GNN for message passing(resuse TableGCN from gcn_conv.py)
+        self.GNN=TableGCN(
+            input_dim=node_dim,
+            hidden_dim=hidden_dim,
+            output_dim=hidden_dim,
+            num_layers=num_layers,
+            dropout=0.1
+        )
+        #Component 2: Attention Pooling for graph-level representation
+        self.attention_pool=AttentionPooling(hidden_dim)
+        #Component 3: Projection head to question space
+        #Gradual Expansion 256 -> 512 -> 768
+        self.projection_head=nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim*2),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim*2, output_dim)
+        )
+    def forward(self, pyg_data, batch=None):
+        """
+        Encode table graph into dense embedding.
+        
+        Args:
+            pyg_data: PyTorch Geometric Data object
+                     - x: [num_nodes, node_dim] node features
+                     - edge_index: [2, num_edges] edge connectivity
+            batch: [num_nodes] - batch assignment (None for single graph)
+        
+        Returns:
+            graph_embedding: [1, output_dim] if batch=None, else [batch_size, output_dim]
+                            L2-normalized for cosine similarity
+        """
+        #Step 1: GNN Message Passing
+        node_embeddings=self.GNN(pyg_data.x, pyg_data.edge_index, batch)
+        #Step 2: Attention based pooling to graph level representation
+        graph_embedding=self.attention_pool(node_embeddings, batch)
+        #Step 3: Project to question space
+        projected_embedding=self.projection_head(graph_embedding)
+        #Step 4: Normalize (L2) for cosine similarity, enables dot product sim
+        projected_embedding=F.normalize(projected_embedding, p=2, dim=-1)
+        return projected_embedding
+
+
+# ============================================================================
+# CONTRASTIVE LOSS
+# ============================================================================
+
+class InfoNCELoss(nn.Module):
+    """
+    InfoNCE (Information Noise-Contrastive Estimation) Loss.
+    Used for contrastive learning with in-batch negatives.
+    
+    Loss encourages:
+    - High similarity between positive pairs (table, matching question)
+    - Low similarity between negative pairs (table, non-matching questions)
+    
+    Mathematical formulation:
+        For each table_i in batch:
+        Loss_i = -log(exp(sim(table_i, question_i) / τ) / Σ_j exp(sim(table_i, question_j) / τ))
+    
+    Where:
+        - sim(a, b) = cosine similarity (dot product for L2-normalized embeddings)
+        - τ = temperature parameter (controls distribution sharpness)
+        - j ranges over all questions in batch (in-batch negatives)
+    """
+    def __init__(self, temperature=0.07):
+        super().__init__()
+        self.temperature=temperature
+        self.criterion=nn.CrossEntropyLoss()
+    def forward(self, table_embeddings, question_embeddings, labels=None):
+        batch_size=table_embeddings.size(0)
+        #Default: diagonal matching
+        if labels is None:
+            labels=torch.arange(batch_size, device=table_embeddings.device)
+        #Compute similarity matrix
+        similarity_matrix=torch.matmul(table_embeddings,question_embeddings.T)/self.temperature
+        #Apply Cross Entropy
+        loss=self.criterion(similarity_matrix, labels)
+        return loss
 
 # ============================================================================
 # TODO: COMPONENTS TO BE ADDED NEXT
