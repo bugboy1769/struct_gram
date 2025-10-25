@@ -14,7 +14,8 @@ This is a refactor of table2graph_sem.py to support the contrastive learning par
 import torch
 import pandas as pd
 import numpy as np
-from torch_geometric.data import Data
+from torch_geometric.data import Data, Batch
+from torch.utils.data import Dataset, DataLoader
 from gcn_conv import TableGCN
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
@@ -1003,9 +1004,447 @@ class InfoNCELoss(nn.Module):
         #Apply Cross Entropy
         loss=self.criterion(similarity_matrix, labels)
         return loss
+    
 
 # ============================================================================
-# TODO: COMPONENTS TO BE ADDED NEXT
+# QUESTION ENCODER
+# ============================================================================
+
+class QuestionGenerator:
+    def __init__(self, semantic_label_generator):
+        self.label_gen=semantic_label_generator
+        self.templates=self._create_question_templates()
+    
+    def _create_question_templates(self):
+        """
+        Create question templates for semantic relationship types.
+        Focuses on 12 most common types, 3 variations each.
+        """
+        templates = {
+            'PRIMARY_FOREIGN_KEY': [
+                "Which columns establish a primary-foreign key relationship?",
+                "What are the key columns that link these entities?",
+                "Which fields define the referential integrity constraint?"
+            ],
+            'TEMPORAL_SEQUENCE': [
+                "Which columns form a temporal sequence?",
+                "What time-ordered relationship exists between these fields?",
+                "Which columns track chronological progression?"
+            ],
+            'AGGREGATION': [
+                "Which columns are related through aggregation?",
+                "What is the summary relationship between these fields?",
+                "Which column aggregates values from the other?"
+            ],
+            'HIERARCHY': [
+                "Which columns form a hierarchical relationship?",
+                "What is the parent-child relationship here?",
+                "Which fields define the organizational structure?"
+            ],
+            'CATEGORICAL_GROUPING': [
+                "Which columns group data categorically?",
+                "What categorical relationship exists between these fields?",
+                "Which column categorizes the other?"
+            ],
+            'ONE_TO_MANY': [
+                "Which columns have a one-to-many relationship?",
+                "What is the cardinality relationship between these fields?",
+                "Which column maps to multiple values in the other?"
+            ],
+            'MANY_TO_MANY': [
+                "Which columns have a many-to-many relationship?",
+                "What is the bidirectional mapping between these fields?",
+                "Which columns form a junction relationship?"
+            ],
+            'DERIVED_CALCULATED': [
+                "Which columns are related through calculation?",
+                "What is the derived relationship between these fields?",
+                "Which column is computed from the other?"
+            ],
+            'COMPOSITE_KEY': [
+                "Which columns form a composite key?",
+                "What is the multi-column key relationship?",
+                "Which fields together define uniqueness?"
+            ],
+            'MEASUREMENT_UNIT': [
+                "Which columns represent the same measurement in different units?",
+                "What is the unit conversion relationship?",
+                "Which fields measure the same quantity?"
+            ],
+            'VERSIONING': [
+                "Which columns track versioning information?",
+                "What is the version history relationship?",
+                "Which fields manage record versions?"
+            ],
+            'STATUS_TRANSITION': [
+                "Which columns track status transitions?",
+                "What is the state change relationship?",
+                "Which fields define workflow progression?"
+            ]
+        }
+        return templates
+    def generate_questions_for_table(self, df, relationships, num_positive=10, num_negative=10):
+        questions=[]
+        columns=list(df.columns)
+        #-------------------- POSITIVE QUESTIONS --------------------------
+        if len(relationships)>0:
+            #Sample Subset of relationships
+            sampled_rels=np.random.choice(
+                relationships,
+                size=min(num_positive, len(relationships)),
+                replace=False
+            ).tolist()
+            for rel in sampled_rels:
+                #Get Semantic Label for this relationship
+                semantic_label=rel.get('semantic_label', np.random.choice(list(self.templates.keys())))
+                #Get template for this label
+                if semantic_label in self.templates:
+                    question_template=np.random.choice(self.templates[semantic_label])
+                else:
+                    #Fallback for unsupported labels
+                    question_template="What is the relationship between these columns?"
+                #Add Column Names to question
+                col1=rel['col1']
+                col2=rel['col2']
+                question=f"{question_template} Focus on '{col1}' and '{col2}'."
+                questions.append({
+                    'table': df,
+                    'question':question,
+                    'label': 1, #Positive
+                    'columns': [col1, col2],
+                    'semantic_label':semantic_label
+                })
+        #---------------------NEGATIVE QUESTIONS------------------------
+        #Build set of existing relationship pairs
+        relationship_pairs={(rel['col1'], rel['col2']) for rel in relationships}
+        relationship_pairs.update({(rel['col2'], rel['col1']) for rel in relationships})
+        negative_count=0
+        max_attempts=num_negative*10
+        attempts=0
+        while negative_count<num_negative and attempts<max_attempts:
+            attempts+=1
+            #Sample random column pair
+            if len(columns)<2:
+                break
+            col1,col2=np.random.choice(columns, size=2, replace=False)
+            #Check if this pair is NOT in relationships (hard negatives)
+            if (col1, col2) not in relationship_pairs:
+                #Pick random semantic label
+                semantic_label=np.random.choice(list(self.templates.keys()))
+                question_template=np.random.choice(self.templates[semantic_label])
+
+                question=f"{question_template} Focus on '{col1}' and '{col2}'."
+                questions.append({
+                    'table':df,
+                    'question':question,
+                    'label':0,
+                    'columns':[col1, col2],
+                    'semantic_label':semantic_label
+                })
+                negative_count+=1
+        return questions
+    def generate_dataset(self, tables, relationship_generator, num_per_table=20):
+        #Generate full contrastive dataset across multiple tables
+        all_questions=[]
+        num_positive=num_per_table//2
+        num_negative=num_per_table-num_positive
+        for df in tables:
+            try:
+                #Generate relationships
+                relationships=relationship_generator.generate_relationships(df)
+                #Generate questions
+                table_questions=self.generate_questions_for_table(
+                    df,
+                    relationships,
+                    num_positive=num_positive,
+                    num_negative=num_negative
+                )
+                all_questions.extend(table_questions)
+            except Exception as e:
+                print(f"Warning: Failed to generate questiosn for this table: {e}")
+                continue
+        return all_questions
+
+
+# ============================================================================
+# PHASE 5: TABLE-QUESTION DATASET
+# ============================================================================
+
+class TableQuestionDataset(Dataset):
+    """
+    PyTorch Dataset for table-question pairs in contrastive learning.
+    Converts tables to PyG graphs on-the-fly.
+    """
+    def __init__(self, question_data, data_processor, pyg_converter):
+        """
+        Args:
+            question_data: list of dicts from QuestionGenerator.generate_dataset()
+                Format: [{'table': df, 'question': str, 'label': int, ...}, ...]
+            data_processor: DataProcessor instance
+            pyg_converter: PyGConverter instance (converts table → PyG graph)
+        """
+        self.question_data = question_data
+        self.data_processor = data_processor
+        self.pyg_converter = pyg_converter
+
+    def __len__(self):
+        return len(self.question_data)
+
+    def __getitem__(self, idx):
+        """
+        Returns:
+            dict: {
+                'graph': PyG Data object,
+                'question': str,
+                'label': int (0 or 1)
+            }
+        """
+        item = self.question_data[idx]
+        df = item['table']
+        question = item['question']
+        label = item['label']
+
+        # Convert table to PyG graph using existing pipeline
+        pyg_data = self.pyg_converter.convert_table(df)
+
+        return {
+            'graph': pyg_data,
+            'question': question,
+            'label': label
+        }
+
+
+def collate_fn(batch):
+    """
+    Custom collate function for batching graphs with questions.
+
+    Args:
+        batch: list of dicts from TableQuestionDataset.__getitem__
+
+    Returns:
+        batched_graphs: PyG Batch object (batched graphs with global batch index)
+        questions: list of question strings
+        labels: torch.LongTensor of shape [batch_size]
+    """
+    graphs = [item['graph'] for item in batch]
+    questions = [item['question'] for item in batch]
+    labels = torch.LongTensor([item['label'] for item in batch])
+
+    # Batch graphs using PyG's Batch.from_data_list
+    # This automatically creates a 'batch' attribute for node-to-graph mapping
+    batched_graphs = Batch.from_data_list(graphs)
+
+    return batched_graphs, questions, labels
+
+
+def create_dataloader(dataset, batch_size=32, shuffle=True, num_workers=0):
+    """
+    Convenience function to create DataLoader with custom collate.
+
+    Args:
+        dataset: TableQuestionDataset instance
+        batch_size: number of table-question pairs per batch
+        shuffle: whether to shuffle data
+        num_workers: number of subprocesses for data loading
+
+    Returns:
+        DataLoader instance
+    """
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        collate_fn=collate_fn,
+        num_workers=num_workers
+    )
+
+
+# ============================================================================
+# CONTRASTIVE TRAINER
+# ============================================================================
+
+class ContrastiveTrainer:
+    """
+    Training loop for contrastive table-question learning.
+    Optimizes InfoNCE loss to align graph and question embeddings.
+    """
+    def __init__(
+            self,
+            graph_encoder,
+            question_encoder,
+            loss_fn,
+            learning_rate=1e-4):
+        self.graph_encoder=graph_encoder
+        self.question_encoder=question_encoder
+        self.loss_fn=loss_fn
+        #Only optimize graph encoder (question encoder is frozen)
+        self.optimizer=torch.optim.AdamW(
+            self.graph_encoder.parameters(),
+            lr=learning_rate,
+            weight_decay=0.01
+        )
+        self.train_losses=[]
+        self.val_losses=[]
+    def train_epoch(self, dataloader):
+        """
+        Train for one epoch.
+        
+        Args:
+            dataloader: DataLoader from create_dataloader()
+        
+        Returns:
+            float: average loss for the epoch
+        """
+        self.graph_encoder.train()
+        epoch_loss=0.0
+        num_batches=0
+        for batched_graphs, questions, labels in dataloader:
+            #Forward Pass
+            graph_embeddings=self.graph_encoder(
+                batched_graphs,
+                batch=batched_graphs.batch
+            )
+            question_embeddings=self.question_encoder(questions)
+            #Compute loss
+            loss=self.loss_fn(graph_embeddings, question_embeddings, labels)
+            #Backprop
+            self.optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.graph_encoder.parameters(),max_norm=1.0)
+            self.optimizer.step()
+            
+            epoch_loss+=loss.item()
+            num_batches+=1
+        avg_loss=epoch_loss/num_batches if num_batches>0 else 0.0
+        return avg_loss
+    @torch.no_grad()
+    def validate(self, dataloader):
+        self.graph_encoder.eval()
+        total_loss=0.0
+        num_batches=0
+
+        all_graph_embeddings=[]
+        all_question_embeddings=[]
+        all_labels=[]
+        for batched_graphs, questions, labels in dataloader:
+            #Forward Pass
+            graph_embeddings=self.graph_encoder(
+                batched_graphs,
+                batch=batched_graphs.batch
+            )
+            question_embeddings=self.question_encoder(questions)
+            #Compute loss
+            loss=self.loss_fn(graph_embeddings, question_embeddings, labels)
+            total_loss+=loss.item()
+            num_batches+=1
+            #Store for recall calculations
+            all_graph_embeddings.append(graph_embeddings)
+            all_question_embeddings.append(question_embeddings)
+            all_labels.append(labels)
+        
+        avg_loss=total_loss/num_batches if num_batches>0 else 0.0
+
+        #Compute Recall@K metrics
+        graph_embs= torch.cat(all_graph_embeddings, dim=0)
+        question_embs=torch.cat(all_question_embeddings, dim=0)
+        labels_tensor=torch.cat(all_labels, dim=0)
+        recall_1=self._compute_recall_at_k(
+            graph_embs, question_embs, labels_tensor, k=1
+        )
+        recall_5=self._compute_recall_at_k(
+            graph_embs, question_embs, labels_tensor, k=5
+        )
+        return {
+            'loss':avg_loss,
+            'recall@1':recall_1,
+            'recall@5': recall_5
+        }
+    def _compute_recall_at_k(self, graph_embeddings, question_embeddings, labels, k=1):
+        """
+        Compute Recall@K for positive pairs.
+        
+        For each question, check if the correct graph is in top-K retrieved graphs.
+        
+        Args:
+            graph_embeddings: [N, 768]
+            question_embeddings: [N, 768]
+            labels: [N] (1 for positive, 0 for negative)
+            k: top-k to consider
+        
+        Returns:
+            float: recall@k (percentage of positive pairs retrieved in top-k)
+        """
+        # Only evaluate on postive pairs
+        positive_mask=labels==1
+        if positive_mask.sum()==0:
+            return 0.0
+        #Compute Similarity Matrix: [N_questions, N_graphs]
+        similarity=torch.matmul(question_embeddings, graph_embeddings.T)
+        #For each question, get top-k 'graphs?'
+        _, top_k_indices=torch.topk(similarity, k=min(k, similarity.size(1)),dim=1)
+        #Check if correct graph is in top-k for positive pairs
+        correct_indices=torch.arange(len(labels), device=labels.device)
+        recalls=[]
+        for i in range(len(labels)):
+            if labels[i]==1: #Only check +ve pairs
+                #Is the correct graph (index i) in top k questions
+                is_in_top_k=correct_indices[i] in top_k_indices[i]
+                recalls.append(is_in_top_k.float().item())
+        recall_at_k=sum(recalls)/len(recalls) if recalls else 0.0
+        return recall_at_k
+    def train(self, train_loader, val_loader, num_epochs=10, print_every=1):
+        """
+        Full training loop.
+        
+        Args:
+            train_loader: Training DataLoader
+            val_loader: Validation DataLoader
+            num_epochs: number of epochs to train
+            print_every: print metrics every N epochs
+        
+        Returns:
+            dict: training history
+        """
+        print(f"Starting training for {num_epochs} epochs ...")
+        for epoch in range(num_epochs):
+            #Train
+            train_loss=self.train_epoch(train_loader)
+            self.train_losses.append(train_loss)
+            #Validate
+            val_metrics=self.validate(val_loader)
+            self.val_losses.append(val_metrics['loss'])
+            if (epoch+1)%print_every==0:
+                print(f"Epoch {epoch+1}/{num_epochs} | "
+                f"Train Loss: {train_loss:.4f} | "
+                f"Val Loss: {val_metrics['loss']:.4f} | "
+                f"Recall@1: {val_metrics['recall@1']:.3f} | "
+                f"Recall@5: {val_metrics['recall@5']:.3f} | ")
+        print("Training Complete")
+        return {
+            'train_losses':self.train_losses,
+            'val_losses': self.val_losses
+        }
+    def save_checkpoint(self, path):
+        """Save model checkpoint"""
+        torch.save({
+            'graph_encoder_state':self.graph_encoder.state_dict(),
+            'optimizer_state':self.optimizer.state_dict(),
+            'train_losses': self.train_losses,
+            'val_losses':self.val_losses
+        }, path)
+        print(f"Checkpoint saved to {path}")
+    def load_checkpoint(self, path):
+        """Load model checkpoint"""
+        checkpoint=torch.load(path)
+        self.graph_encoder.load_state_dict(checkpoint['graph_encoder_state'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state'])
+        self.train_losses=checkpoint.get('train_losses', [])
+        self.val_losses=checkpoint.get('val_losses', [])
+        print(f"Checkpoint loaded from {path}")
+
+
+# ============================================================================
+# TODO: COMPONENTS TO BE ADDED NEXT (ALL DONE)
 # ============================================================================
 
 """
