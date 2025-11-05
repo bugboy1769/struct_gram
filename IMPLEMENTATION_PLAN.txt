@@ -1,0 +1,1457 @@
+================================================================================
+TABLE-LEVEL RETRIEVAL IMPLEMENTATION PLAN
+================================================================================
+
+Project: Contrastive Learning for Table-to-Graph Semantic Analysis
+Goal: Fix question generation and add column name semantics for better alignment
+Total Changes: 7 phases, ~550 lines modified/added
+Estimated Time: 3-4 hours
+
+================================================================================
+PHASE 0: ADD COLUMN NAME SEMANTICS TO NODE FEATURES
+================================================================================
+
+RATIONALE:
+---------
+Enhance semantic alignment between graph space and question space by adding
+column name embeddings to node features. This allows GNN to access lexical
+information (e.g., "admittime" relates to "admission", "temporal").
+
+Node features: 512-d (statistical) → 896-d (512 statistical + 384 column name)
+
+FILES MODIFIED:
+--------------
+- contrastive_table2graph.py (Lines 723-788)
+
+CHANGES:
+--------
+
+Change 0.1: Modify LightweightFeatureTokenizer.__init__()
+Location: Lines 724-745
+
+REPLACE:
+```python
+def __init__(self, embedding_strategy='hybrid', include_column_names=True):
+    self.embedding_strategy=embedding_strategy
+    self.include_column_names=include_column_names
+    #For statistical features
+    self.semantic_encoder=None #Sentence Transformer for column embeddings
+    self.vectorizer=None #Tfidf vectorizer
+    #For column name semantics
+    if self.include_column_names:
+        from sentence_transformers import SentenceTransformer
+        self.column_name_encoder=SentenceTransformer('all-MiniLM-L6-v2')
+        self.column_name_encoder.eval()
+        #Freeze weights
+        for param in self.column_name_encoder.parameters():
+            param.requires_grad=False
+        self.column_name_dim=384 #all-MiniLM-L6-v2 output dimension
+    else:
+        self.column_name_encoder=None
+        self.column_name_dim=0
+    #Total Feature Dimension
+    self.stat_feature_dim=512
+    self.feature_dim=self.stat_feature_dim + self.column_name_dim #512 + 384 = 896
+    self._initialize_encoders()
+```
+
+WITH:
+```python
+def __init__(self, embedding_strategy='hybrid', include_column_names=True):
+    self.embedding_strategy = embedding_strategy
+    self.include_column_names = include_column_names
+
+    # For statistical features
+    self.semantic_encoder = None  # SentenceTransformer for value embeddings
+    self.vectorizer = None  # TfidfVectorizer
+
+    # For column name semantics (NEW)
+    if self.include_column_names:
+        from sentence_transformers import SentenceTransformer
+        self.column_name_encoder = SentenceTransformer('all-MiniLM-L6-v2')
+        self.column_name_encoder.eval()
+        # Freeze weights
+        for param in self.column_name_encoder.parameters():
+            param.requires_grad = False
+        self.column_name_dim = 384  # all-MiniLM-L6-v2 output dimension
+    else:
+        self.column_name_encoder = None
+        self.column_name_dim = 0
+
+    # Total feature dimension
+    self.stat_feature_dim = 512
+    self.feature_dim = self.stat_feature_dim + self.column_name_dim  # 896 or 512
+
+    self._initialize_encoders()
+```
+
+Lines changed: ~25
+
+
+Change 0.2: Modify LightweightFeatureTokenizer.encode_column_content()
+Location: Lines 753-776
+
+CURRENT CODE:
+```python
+def encode_column_content(self, content_dict):
+    inner_content=list(content_dict.values())[0]
+    content_text=inner_content['column_content']
+    dtype=inner_content['data_type']
+    sample_size=int(inner_content['sample_size'])
+    embeddings=[]
+    if self.semantic_encoder:
+        semantic_embed=self.semantic_encoder.encode(content_text)
+        embeddings.append(semantic_embed)
+    if self.vectorizer:
+        if hasattr(self.vectorizer, 'vocabulary_'):
+            statistical_embed=self.vectorizer.transform([content_text]).toarray()[0]
+            embeddings.append(statistical_embed)
+    metadata_features=self._engineer_metadata_features(dtype, sample_size, content_text)
+    embeddings.append(metadata_features)
+    if embeddings:
+        full_embedding=np.concatenate(embeddings)
+    else:
+        full_embedding=np.zeros(8)
+    if len(full_embedding) < self.feature_dim:
+        padding=np.zeros(self.feature_dim - len(full_embedding))
+        return np.concatenate([full_embedding, padding])
+    else:
+        return full_embedding[:self.feature_dim]
+```
+
+REPLACE WITH:
+```python
+def encode_column_content(self, content_dict):
+    """
+    Encode column features including statistical properties and column name semantics.
+
+    Args:
+        content_dict: dict from ColumnContentExtractor.get_col_stats()
+                      Structure: {"column_name <col>": {"column_content": ...,
+                                                         "column_header": ...,
+                                                         "sample_size": ...,
+                                                         "data_type": ...}}
+
+    Returns:
+        numpy array: [896] if include_column_names=True, [512] otherwise
+    """
+    # Extract column information
+    inner_content = list(content_dict.values())[0]
+    content_text = inner_content['column_content']
+    column_name = inner_content['column_header']  # Extract column name
+    dtype = inner_content['data_type']
+    sample_size = int(inner_content['sample_size'])
+
+    # Part 1: Statistical features (existing logic)
+    embeddings = []
+
+    if self.semantic_encoder:
+        semantic_embed = self.semantic_encoder.encode(content_text)
+        embeddings.append(semantic_embed)
+
+    if self.vectorizer:
+        if hasattr(self.vectorizer, 'vocabulary_'):
+            statistical_embed = self.vectorizer.transform([content_text]).toarray()[0]
+            embeddings.append(statistical_embed)
+
+    metadata_features = self._engineer_metadata_features(dtype, sample_size, content_text)
+    embeddings.append(metadata_features)
+
+    if embeddings:
+        stat_embedding = np.concatenate(embeddings)
+    else:
+        stat_embedding = np.zeros(8)
+
+    # Pad or truncate to 512-d
+    if len(stat_embedding) < self.stat_feature_dim:
+        padding = np.zeros(self.stat_feature_dim - len(stat_embedding))
+        stat_embedding = np.concatenate([stat_embedding, padding])
+    else:
+        stat_embedding = stat_embedding[:self.stat_feature_dim]
+
+    # Part 2: Column name semantics (NEW)
+    if self.include_column_names and self.column_name_encoder is not None:
+        import torch
+        with torch.no_grad():
+            # Encode column name
+            col_name_embedding = self.column_name_encoder.encode(
+                column_name,
+                convert_to_tensor=True,
+                show_progress_bar=False
+            )  # [384]
+
+            # Convert to numpy and concatenate
+            col_name_np = col_name_embedding.cpu().numpy()
+            full_embedding = np.concatenate([stat_embedding, col_name_np])  # [896]
+            return full_embedding
+    else:
+        return stat_embedding  # [512]
+```
+
+Lines changed: ~65 (replace 24 lines with ~70 lines)
+
+
+Change 0.3: Update GraphBuilder.__init__() to track node feature dimension
+Location: Lines 807-814
+
+ADD after line 814:
+```python
+# Store node feature dimension for downstream components
+self.node_feature_dim = self.feature_tokenizer.feature_dim  # Will be 896 or 512
+```
+
+Lines added: 2
+
+
+TESTING PHASE 0:
+---------------
+```python
+# Test column encoding with name semantics
+import pandas as pd
+from contrastive_table2graph import (
+    ColumnContentExtractor,
+    LightweightFeatureTokenizer
+)
+
+# Initialize
+extractor = ColumnContentExtractor()
+tokenizer = LightweightFeatureTokenizer(
+    embedding_strategy='hybrid',
+    include_column_names=True
+)
+
+# Test with sample column
+df = pd.DataFrame({
+    'admittime': pd.date_range('2020-01-01', periods=100),
+    'subject_id': range(100)
+})
+
+# Encode admittime column
+content_dict = extractor.get_col_stats(df, 'admittime')
+embedding = tokenizer.encode_column_content(content_dict)
+
+print(f"Embedding shape: {embedding.shape}")  # Expected: (896,)
+print(f"Statistical part: {embedding[:512].shape}")  # First 512
+print(f"Column name part: {embedding[512:].shape}")  # Last 384
+
+# Verify column name semantics are meaningful
+subject_content = extractor.get_col_stats(df, 'subject_id')
+subject_embedding = tokenizer.encode_column_content(subject_content)
+
+# Column name portions should be different
+name_similarity = np.dot(embedding[512:], subject_embedding[512:])
+print(f"Column name similarity (admittime vs subject_id): {name_similarity:.3f}")
+# Expected: Low similarity (< 0.5) since semantically different
+```
+
+EXPECTED RESULTS:
+----------------
+✅ Node features dimension: 896
+✅ First 512 dimensions: statistical features
+✅ Last 384 dimensions: column name embeddings
+✅ Column name embeddings capture semantic differences
+✅ GraphBuilder correctly uses 896-d features
+
+
+================================================================================
+PHASE 1: ADD GRAPHBUILDER.CONVERT_TABLE() ALIAS
+================================================================================
+
+RATIONALE:
+---------
+TableQuestionDataset.__getitem__() calls convert_table() but method doesn't exist.
+Add alias for build_graph() for API compatibility.
+
+FILES MODIFIED:
+--------------
+- contrastive_table2graph.py (After line 855)
+
+CHANGES:
+--------
+
+Change 1.1: Add convert_table() method to GraphBuilder
+Location: After line 855 (end of build_graph method)
+
+ADD:
+```python
+    def convert_table(self, df):
+        """
+        Alias for build_graph() - converts DataFrame to PyG Data object.
+
+        This method exists for API compatibility with TableQuestionDataset.
+
+        Args:
+            df: pandas DataFrame
+
+        Returns:
+            torch_geometric.data.Data: Graph with node features and edges
+        """
+        return self.build_graph(df)
+```
+
+Lines added: 13
+
+
+TESTING PHASE 1:
+---------------
+```python
+# Test convert_table alias
+from contrastive_table2graph import GraphBuilder
+
+graph_builder = GraphBuilder(
+    content_extractor,
+    feature_tokenizer,
+    relationship_generator,
+    semantic_label_generator
+)
+
+df = pd.read_csv('hosp/admissions.csv')
+
+# Test both methods produce identical results
+pyg_data1 = graph_builder.build_graph(df)
+pyg_data2 = graph_builder.convert_table(df)
+
+print(f"build_graph() node features: {pyg_data1.x.shape}")
+print(f"convert_table() node features: {pyg_data2.x.shape}")
+print(f"Are identical: {torch.equal(pyg_data1.x, pyg_data2.x)}")
+
+# Expected output:
+# build_graph() node features: torch.Size([16, 896])
+# convert_table() node features: torch.Size([16, 896])
+# Are identical: True
+```
+
+EXPECTED RESULTS:
+----------------
+✅ convert_table() exists and is callable
+✅ Produces identical output to build_graph()
+✅ TableQuestionDataset can call convert_table() without errors
+
+
+================================================================================
+PHASE 2: ADD HELPER METHODS TO QUESTIONGENERATOR
+================================================================================
+
+RATIONALE:
+---------
+Need table analysis logic to classify tables into pattern categories based on
+structural characteristics (temporal patterns, FK relationships, measurements).
+
+FILES MODIFIED:
+--------------
+- contrastive_table2graph.py (After line 1168)
+
+CHANGES:
+--------
+
+Change 2.1: Add _analyze_table_structure() method
+Location: After line 1168 (end of generate_dataset method)
+
+ADD:
+```python
+    def _analyze_table_structure(self, df, relationships):
+        """
+        Analyze table to determine dominant structural patterns.
+
+        Args:
+            df: pandas DataFrame
+            relationships: list of relationship dicts from RelationshipGenerator
+
+        Returns:
+            dict: {
+                'has_temporal': bool,
+                'fk_count': int,
+                'has_measurements': bool,
+                'is_reference_table': bool,
+                'dominant_category': str,
+                'secondary_category': str or None,
+                'domain': str
+            }
+        """
+        # Count relationship types
+        relationship_labels = [rel.get('feature_label', '') for rel in relationships]
+
+        fk_count = sum(1 for label in relationship_labels
+                       if any(kw in label for kw in ['KEY', 'REFERENCE', 'FOREIGN']))
+
+        temporal_count = sum(1 for label in relationship_labels
+                            if 'TEMPORAL' in label)
+
+        measure_count = sum(1 for label in relationship_labels
+                           if any(kw in label for kw in ['MEASURE', 'AGGREGATION', 'NUMERIC']))
+
+        # Detect column patterns
+        has_temporal = self._has_temporal_columns(df)
+        has_measurements = self._has_measurement_columns(df)
+        is_reference = self._is_reference_table(df)
+
+        # Infer domain from column names
+        domain = self._infer_domain_from_columns(df)
+
+        # Classify dominant category based on structural patterns
+        category_scores = {
+            'reference_data': 0,
+            'transactional_events': 0,
+            'temporal_tracking': 0,
+            'measurement_data': 0,
+            'entity_linking': 0,
+            'entity_attributes': 0
+        }
+
+        # Scoring logic
+        if is_reference:
+            category_scores['reference_data'] += 10
+
+        if fk_count >= 3 and temporal_count >= 2:
+            category_scores['transactional_events'] += 10
+
+        if temporal_count >= 2 or has_temporal:
+            category_scores['temporal_tracking'] += 5
+
+        if has_measurements or measure_count >= 2:
+            category_scores['measurement_data'] += 5
+
+        if fk_count >= 2:
+            category_scores['entity_linking'] += 5
+
+        if len(df.columns) <= 8 and fk_count <= 1:
+            category_scores['entity_attributes'] += 5
+
+        # Get dominant and secondary categories
+        sorted_categories = sorted(category_scores.items(), key=lambda x: x[1], reverse=True)
+        dominant_category = sorted_categories[0][0]
+        secondary_category = sorted_categories[1][0] if sorted_categories[1][1] > 0 else None
+
+        return {
+            'has_temporal': has_temporal,
+            'fk_count': fk_count,
+            'has_measurements': has_measurements,
+            'is_reference_table': is_reference,
+            'dominant_category': dominant_category,
+            'secondary_category': secondary_category,
+            'domain': domain
+        }
+```
+
+Lines added: 80
+
+
+Change 2.2: Add _has_temporal_columns() method
+
+ADD:
+```python
+    def _has_temporal_columns(self, df):
+        """
+        Check if table has timestamp/date columns.
+
+        Args:
+            df: pandas DataFrame
+
+        Returns:
+            bool: True if temporal columns detected
+        """
+        temporal_keywords = ['time', 'date', 'timestamp', 'dob', 'dod',
+                            'admit', 'discharge', 'chart', 'store']
+
+        for col in df.columns:
+            col_lower = col.lower()
+            if any(kw in col_lower for kw in temporal_keywords):
+                return True
+
+        # Also check dtype
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                return True
+
+        return False
+```
+
+Lines added: 24
+
+
+Change 2.3: Add _has_measurement_columns() method
+
+ADD:
+```python
+    def _has_measurement_columns(self, df):
+        """
+        Check if table has numeric measurement columns.
+
+        Args:
+            df: pandas DataFrame
+
+        Returns:
+            bool: True if measurement columns detected
+        """
+        measurement_keywords = ['value', 'amount', 'measure', 'range',
+                               'score', 'result', 'count', 'rate',
+                               'lower', 'upper', 'num']
+
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+
+        for col in numeric_cols:
+            col_lower = col.lower()
+            if any(kw in col_lower for kw in measurement_keywords):
+                return True
+
+        # If more than 30% of columns are numeric, likely measurement table
+        if len(numeric_cols) / len(df.columns) > 0.3:
+            return True
+
+        return False
+```
+
+Lines added: 26
+
+
+Change 2.4: Add _is_reference_table() method
+
+ADD:
+```python
+    def _is_reference_table(self, df):
+        """
+        Check if table is a reference/lookup table.
+
+        Pattern: Has code/id column + description/name column, few total columns.
+
+        Args:
+            df: pandas DataFrame
+
+        Returns:
+            bool: True if reference table pattern detected
+        """
+        cols_lower = [c.lower() for c in df.columns]
+
+        # Check for code/id column
+        has_code = any(kw in ' '.join(cols_lower) for kw in ['code', '_id', 'itemid'])
+
+        # Check for description/name column
+        has_desc = any(kw in ' '.join(cols_lower) for kw in ['desc', 'name', 'label', 'title', 'category'])
+
+        # Reference tables typically have few columns
+        is_small = len(df.columns) <= 6
+
+        return has_code and has_desc and is_small
+```
+
+Lines added: 25
+
+
+Change 2.5: Add _infer_domain_from_columns() method
+
+ADD:
+```python
+    def _infer_domain_from_columns(self, df):
+        """
+        Infer semantic domain from column names.
+
+        Args:
+            df: pandas DataFrame
+
+        Returns:
+            str: Domain name (e.g., 'admission', 'patient', 'diagnosis', 'lab')
+        """
+        col_str = ' '.join(df.columns).lower()
+
+        # Define domain keywords (ordered by specificity)
+        domain_keywords = {
+            'admission': ['admit', 'discharge', 'hadm', 'edregtime', 'edouttime'],
+            'patient': ['patient', 'subject', 'gender', 'anchor_age', 'dob', 'dod'],
+            'diagnosis': ['diagnosis', 'icd', 'diag', 'icd_code', 'icd_version'],
+            'lab': ['lab', 'specimen', 'itemid', 'charttime', 'valuenum', 'valueuom'],
+            'medication': ['drug', 'medication', 'prescription', 'dose', 'pharmacy', 'emar'],
+            'procedure': ['procedure', 'surgery', 'operation', 'cpt'],
+            'transfer': ['transfer', 'ward', 'careunit', 'intime', 'outtime'],
+            'provider': ['provider', 'physician', 'doctor', 'caregiver'],
+            'microbiology': ['micro', 'organism', 'antibody', 'culture'],
+            'service': ['service', 'curr_service', 'prev_service'],
+        }
+
+        # Check for matches
+        for domain, keywords in domain_keywords.items():
+            if any(kw in col_str for kw in keywords):
+                return domain
+
+        return 'clinical'  # Default fallback
+```
+
+Lines added: 35
+
+
+Change 2.6: Add _add_domain_context() method
+
+ADD:
+```python
+    def _add_domain_context(self, template, domain):
+        """
+        Add domain-specific context to generic templates.
+
+        Example: "Which table tracks events?" → "Which table tracks admission events?"
+
+        Args:
+            template: str - question template
+            domain: str - domain name from _infer_domain_from_columns()
+
+        Returns:
+            str: Contextualized template
+        """
+        domain_terms = {
+            'admission': 'admission',
+            'patient': 'patient',
+            'diagnosis': 'diagnostic',
+            'lab': 'laboratory',
+            'medication': 'medication',
+            'procedure': 'procedural',
+            'transfer': 'transfer',
+            'provider': 'provider',
+            'microbiology': 'microbiology',
+            'service': 'service',
+            'clinical': 'clinical'
+        }
+
+        if domain in domain_terms:
+            term = domain_terms[domain]
+            # Add domain context to generic terms
+            template = template.replace(' events', f' {term} events')
+            template = template.replace(' records', f' {term} records')
+            template = template.replace(' activities', f' {term} activities')
+            template = template.replace(' data', f' {term} data')
+
+        return template
+```
+
+Lines added: 37
+
+
+TESTING PHASE 2:
+---------------
+```python
+# Test table analysis
+from contrastive_table2graph import (
+    QuestionGenerator,
+    SemanticLabelGenerator,
+    RelationshipGenerator
+)
+
+question_gen = QuestionGenerator(SemanticLabelGenerator())
+rel_gen = RelationshipGenerator()
+
+# Test with admissions table
+df = pd.read_csv('hosp/admissions.csv')
+relationships = rel_gen.compute_labeled_relationships(df, question_gen.label_gen)
+
+analysis = question_gen._analyze_table_structure(df, relationships)
+
+print("Table Analysis Results:")
+print(f"  Domain: {analysis['domain']}")
+print(f"  Dominant category: {analysis['dominant_category']}")
+print(f"  Secondary category: {analysis['secondary_category']}")
+print(f"  Has temporal: {analysis['has_temporal']}")
+print(f"  FK count: {analysis['fk_count']}")
+print(f"  Is reference: {analysis['is_reference_table']}")
+
+# Expected for admissions.csv:
+# Domain: admission
+# Dominant category: transactional_events or temporal_tracking
+# Has temporal: True
+# FK count: 2+
+
+# Test domain inference
+patients_df = pd.read_csv('hosp/patients.csv')
+domain = question_gen._infer_domain_from_columns(patients_df)
+print(f"Patients table domain: {domain}")  # Expected: 'patient'
+
+# Test domain context
+template = "Which table tracks events?"
+contextualized = question_gen._add_domain_context(template, 'admission')
+print(f"Contextualized: {contextualized}")
+# Expected: "Which table tracks admission events?"
+```
+
+EXPECTED RESULTS:
+----------------
+✅ Table analysis correctly identifies structural patterns
+✅ Domain inference extracts semantic domain from columns
+✅ Category classification matches table characteristics
+✅ Domain contextualization adds specific terms to templates
+
+
+================================================================================
+PHASE 3: REWRITE QUESTION TEMPLATES
+================================================================================
+
+RATIONALE:
+---------
+Replace semantic label-based templates with pattern-based templates that
+describe table-level characteristics without mentioning columns or semantic labels.
+
+FILES MODIFIED:
+--------------
+- contrastive_table2graph.py (Lines 1021-1088)
+
+CHANGES:
+--------
+
+Change 3.1: Replace _create_question_templates() method
+Location: Lines 1021-1088
+
+REMOVE LINES 1021-1088 (67 lines)
+
+REPLACE WITH:
+```python
+    def _create_question_templates(self):
+        """
+        Table-level question templates organized by structural patterns.
+
+        Categories based on OBSERVABLE PATTERNS, not semantic labels:
+        - temporal_tracking: Tables with time-ordered data
+        - entity_linking: FK-heavy tables connecting entities
+        - measurement_data: Numeric values with units/ranges
+        - reference_data: Lookup tables (code + description)
+        - transactional_events: Fact tables (FK + temporal + events)
+        - entity_attributes: Dimension tables (descriptive attributes)
+
+        Each category has 12 variations for diversity.
+        NO column names, NO semantic labels mentioned.
+        """
+        templates = {
+            # Category 1: Temporal tracking
+            'temporal_tracking': [
+                "Which table tracks time-ordered events?",
+                "Which table contains temporal sequences?",
+                "Which table stores timestamped records?",
+                "Which table has chronological data entries?",
+                "Which table maintains time-series information?",
+                "Which table records events over time?",
+                "Which table includes temporal progression data?",
+                "Which table captures time-based activities?",
+                "Which table logs sequential timestamps?",
+                "Which table tracks temporal event history?",
+                "Which table contains date-ordered records?",
+                "Which table stores historical time data?"
+            ],
+
+            # Category 2: Entity linking (FK relationships)
+            'entity_linking': [
+                "Which table links multiple entities together?",
+                "Which table connects different data dimensions?",
+                "Which table establishes relationships between records?",
+                "Which table bridges multiple data sources?",
+                "Which table associates related entities?",
+                "Which table maintains referential connections?",
+                "Which table creates linkages across datasets?",
+                "Which table joins disparate data elements?",
+                "Which table connects related information?",
+                "Which table provides relational mappings?",
+                "Which table ties together multiple records?",
+                "Which table enables cross-referencing?"
+            ],
+
+            # Category 3: Measurement data
+            'measurement_data': [
+                "Which table stores quantitative measurements?",
+                "Which table contains numeric observations?",
+                "Which table tracks measured values with units?",
+                "Which table has reference ranges for values?",
+                "Which table records numerical results?",
+                "Which table maintains measurement readings?",
+                "Which table captures quantitative data?",
+                "Which table stores metric values?",
+                "Which table includes numeric indicators?",
+                "Which table tracks test results?",
+                "Which table contains measured quantities?",
+                "Which table records observational values?"
+            ],
+
+            # Category 4: Reference/lookup tables
+            'reference_data': [
+                "Which table provides lookup codes and descriptions?",
+                "Which table contains categorical classifications?",
+                "Which table stores standardized terminology?",
+                "Which table maintains code mappings?",
+                "Which table includes reference codes?",
+                "Which table holds classification schemes?",
+                "Which table contains enumeration values?",
+                "Which table provides code definitions?",
+                "Which table stores standard vocabularies?",
+                "Which table maintains taxonomy codes?",
+                "Which table includes coded categories?",
+                "Which table contains dictionary entries?"
+            ],
+
+            # Category 5: Transactional events (fact tables)
+            'transactional_events': [
+                "Which table records transactional activities?",
+                "Which table stores detailed event logs?",
+                "Which table captures operational transactions?",
+                "Which table tracks individual occurrences?",
+                "Which table logs specific instances?",
+                "Which table maintains event records?",
+                "Which table contains activity logs?",
+                "Which table records discrete events?",
+                "Which table stores transaction history?",
+                "Which table tracks operational events?",
+                "Which table captures factual occurrences?",
+                "Which table logs business transactions?"
+            ],
+
+            # Category 6: Entity attributes (dimension tables)
+            'entity_attributes': [
+                "Which table provides descriptive attributes?",
+                "Which table stores entity characteristics?",
+                "Which table contains demographic information?",
+                "Which table maintains entity profiles?",
+                "Which table holds attribute data?",
+                "Which table describes entity properties?",
+                "Which table contains identifying information?",
+                "Which table stores static attributes?",
+                "Which table maintains reference attributes?",
+                "Which table provides contextual details?",
+                "Which table contains entity metadata?",
+                "Which table stores dimensional information?"
+            ]
+        }
+
+        return templates
+```
+
+Lines replaced: 67 → 130 (+63 net)
+
+
+TESTING PHASE 3:
+---------------
+```python
+# Test template structure
+question_gen = QuestionGenerator(SemanticLabelGenerator())
+templates = question_gen.templates
+
+print("Template Categories:")
+for category in templates.keys():
+    print(f"  - {category}: {len(templates[category])} templates")
+
+# Expected output:
+# Template Categories:
+#   - temporal_tracking: 12 templates
+#   - entity_linking: 12 templates
+#   - measurement_data: 12 templates
+#   - reference_data: 12 templates
+#   - transactional_events: 12 templates
+#   - entity_attributes: 12 templates
+
+# Verify no column names in templates
+all_templates = []
+for category_templates in templates.values():
+    all_templates.extend(category_templates)
+
+# Check for common MIMIC column names
+column_keywords = ['subject_id', 'hadm_id', 'admittime', 'dischtime',
+                   'gender', 'age', 'icd_code', 'valuenum']
+found_columns = []
+for template in all_templates:
+    for keyword in column_keywords:
+        if keyword in template.lower():
+            found_columns.append((template, keyword))
+
+print(f"\nColumn names found in templates: {len(found_columns)}")
+# Expected: 0
+
+# Verify table-level focus
+table_focused = sum(1 for t in all_templates if 'which table' in t.lower())
+print(f"Templates asking 'Which table': {table_focused}/{len(all_templates)}")
+# Expected: 72/72 (100%)
+```
+
+EXPECTED RESULTS:
+----------------
+✅ 6 pattern categories (not 12 semantic label categories)
+✅ 12 templates per category (72 total)
+✅ Zero column names in any template
+✅ All templates are table-level questions
+
+
+================================================================================
+PHASE 4: REWRITE QUESTION GENERATION LOGIC
+================================================================================
+
+RATIONALE:
+---------
+Change from generating 20 questions about different column pairs to generating
+20 questions about the SAME table from different perspectives.
+
+FILES MODIFIED:
+--------------
+- contrastive_table2graph.py (Lines 1089-1149)
+
+CHANGES:
+--------
+
+Change 4.1: Replace generate_questions_for_table() method
+Location: Lines 1089-1149
+
+REMOVE LINES 1089-1149 (60 lines)
+
+REPLACE WITH:
+```python
+    def generate_questions_for_table(self, df, relationships, num_questions=20):
+        """
+        Generate multiple table-level questions for a single table.
+
+        All questions describe the SAME table from different semantic perspectives.
+        Questions are selected based on the table's structural patterns.
+
+        Args:
+            df: pandas DataFrame
+            relationships: list of relationship dicts
+            num_questions: int (default 20)
+
+        Returns:
+            list of dicts: [{'table': df, 'question': str, 'label': 1, 'table_name': str}, ...]
+        """
+        if len(relationships) == 0:
+            # If no relationships found, default to entity_attributes category
+            dominant_category = 'entity_attributes'
+            domain = self._infer_domain_from_columns(df)
+        else:
+            # Analyze table structure to determine category
+            analysis = self._analyze_table_structure(df, relationships)
+            dominant_category = analysis['dominant_category']
+            secondary_category = analysis.get('secondary_category')
+            domain = analysis['domain']
+
+        # Get templates for dominant category
+        category_templates = self.templates[dominant_category]
+
+        # Determine mix: 70% dominant, 30% secondary (if available)
+        if 'secondary_category' in locals() and secondary_category and len(relationships) > 0:
+            dominant_count = int(num_questions * 0.7)
+            secondary_count = num_questions - dominant_count
+
+            # Sample from dominant category
+            dominant_templates = np.random.choice(
+                category_templates,
+                size=dominant_count,
+                replace=True  # Allow repeats for diversity
+            ).tolist()
+
+            # Sample from secondary category
+            secondary_templates = np.random.choice(
+                self.templates[secondary_category],
+                size=secondary_count,
+                replace=True
+            ).tolist()
+
+            # Combine
+            sampled_templates = dominant_templates + secondary_templates
+        else:
+            # Only use dominant category
+            sampled_templates = np.random.choice(
+                category_templates,
+                size=num_questions,
+                replace=True
+            ).tolist()
+
+        # Optionally add domain context to templates
+        contextualized_templates = [
+            self._add_domain_context(template, domain)
+            for template in sampled_templates
+        ]
+
+        # Create question objects
+        questions = []
+        table_name = df.name if hasattr(df, 'name') else 'unknown'
+
+        for template in contextualized_templates:
+            questions.append({
+                'table': df,
+                'question': template,
+                'label': 1,  # All are positive examples
+                'table_name': table_name
+            })
+
+        return questions
+```
+
+Lines replaced: 60 → 80 (+20 net)
+
+
+TESTING PHASE 4:
+---------------
+```python
+# Test question generation for single table
+import pandas as pd
+from contrastive_table2graph import (
+    QuestionGenerator,
+    SemanticLabelGenerator,
+    RelationshipGenerator
+)
+
+question_gen = QuestionGenerator(SemanticLabelGenerator())
+rel_gen = RelationshipGenerator()
+
+# Load admissions table
+df = pd.read_csv('hosp/admissions.csv')
+df.name = 'admissions'
+
+# Generate relationships
+relationships = rel_gen.compute_labeled_relationships(df, question_gen.label_gen)
+
+# Generate questions
+questions = question_gen.generate_questions_for_table(df, relationships, num_questions=20)
+
+print(f"Generated {len(questions)} questions for table: {df.name}")
+print("\nSample questions:")
+for i, q in enumerate(questions[:5], 1):
+    print(f"  {i}. {q['question']}")
+
+# Validate NO column names in questions
+all_questions_text = ' '.join([q['question'] for q in questions])
+column_names = list(df.columns)
+found_columns = [col for col in column_names if col in all_questions_text]
+
+print(f"\nValidation:")
+print(f"  Column names found: {found_columns}")  # Expected: []
+print(f"  All questions point to same table: {len(set(id(q['table']) for q in questions)) == 1}")
+print(f"  All have table_name='admissions': {all(q['table_name'] == 'admissions' for q in questions)}")
+
+# Expected sample output:
+# Generated 20 questions for table: admissions
+#
+# Sample questions:
+#   1. Which table tracks time-ordered admission events?
+#   2. Which table records transactional admission activities?
+#   3. Which table stores timestamped admission records?
+#   4. Which table contains temporal admission sequences?
+#   5. Which table links multiple entities together?
+#
+# Validation:
+#   Column names found: []
+#   All questions point to same table: True
+#   All have table_name='admissions': True
+```
+
+EXPECTED RESULTS:
+----------------
+✅ 20 questions generated per table
+✅ All questions describe same table (no column-pair focus)
+✅ Zero column names in generated questions
+✅ Questions contextualized with domain (e.g., "admission events")
+✅ Mix of dominant and secondary category templates
+
+
+================================================================================
+PHASE 5: ADD TABLE NAME TRACKING
+================================================================================
+
+RATIONALE:
+---------
+Enable debugging and evaluation by tracking which table each training example
+comes from.
+
+FILES MODIFIED:
+--------------
+- contrastive_table2graph.py (Lines 1195-1216)
+
+CHANGES:
+--------
+
+Change 5.1: Update TableQuestionDataset.__getitem__()
+Location: Lines 1195-1216
+
+CURRENT CODE:
+```python
+def __getitem__(self, idx):
+    item = self.question_data[idx]
+    df = item['table']
+    question = item['question']
+    label = item['label']
+
+    pyg_data = self.pyg_converter.convert_table(df)
+
+    return {
+        'graph': pyg_data,
+        'question': question,
+        'label': label
+    }
+```
+
+REPLACE WITH:
+```python
+def __getitem__(self, idx):
+    item = self.question_data[idx]
+    df = item['table']
+    question = item['question']
+    label = item['label']
+
+    # Ensure table has a name for tracking
+    if not hasattr(df, 'name') or df.name is None:
+        df.name = item.get('table_name', f'table_{idx}')
+
+    # Convert table to graph
+    pyg_data = self.pyg_converter.convert_table(df)
+
+    return {
+        'graph': pyg_data,
+        'question': question,
+        'label': label,
+        'table_name': df.name  # Add table identifier
+    }
+```
+
+Lines changed: +7 (13 → 20)
+
+
+TESTING PHASE 5:
+---------------
+```python
+# Test dataset with table tracking
+from contrastive_table2graph import (
+    TableQuestionDataset,
+    GraphBuilder,
+    DataProcessor
+)
+
+# Generate questions (using Phase 4 logic)
+questions = question_gen.generate_dataset(
+    [df],
+    rel_gen,
+    num_per_table=20
+)
+
+# Create dataset
+dataset = TableQuestionDataset(
+    questions,
+    DataProcessor(),
+    graph_builder
+)
+
+# Test __getitem__
+sample = dataset[0]
+
+print("Dataset Sample Keys:")
+print(f"  {list(sample.keys())}")
+# Expected: ['graph', 'question', 'label', 'table_name']
+
+print(f"\nSample Data:")
+print(f"  Table name: {sample['table_name']}")
+print(f"  Question: {sample['question']}")
+print(f"  Graph nodes: {sample['graph'].x.shape}")
+print(f"  Graph edges: {sample['graph'].edge_index.shape}")
+
+# Expected output:
+# Dataset Sample Keys:
+#   ['graph', 'question', 'label', 'table_name']
+#
+# Sample Data:
+#   Table name: admissions
+#   Question: Which table tracks temporal admission events?
+#   Graph nodes: torch.Size([16, 896])
+#   Graph edges: torch.Size([2, E])
+```
+
+EXPECTED RESULTS:
+----------------
+✅ Dataset returns table_name in output dict
+✅ table_name is correctly populated from df.name
+✅ Can track which table each example came from
+
+
+================================================================================
+PHASE 6: UPDATE TRAINING NOTEBOOK
+================================================================================
+
+RATIONALE:
+---------
+Update notebook initialization to use 896-d node features and assign table names
+when loading data.
+
+FILES MODIFIED:
+--------------
+- Contrastive_Table2Graph_Training.ipynb (Cells 8, 12, 15)
+
+CHANGES:
+--------
+
+Change 6.1: Update FeatureTokenizer initialization
+Location: Cell 12 (Component initialization)
+
+CURRENT:
+```python
+# Initialize components
+feature_tokenizer = LightweightFeatureTokenizer()
+```
+
+REPLACE WITH:
+```python
+# Initialize components with column name semantics
+feature_tokenizer = LightweightFeatureTokenizer(
+    embedding_strategy='hybrid',
+    include_column_names=True  # NEW: Add column name embeddings (896-d nodes)
+)
+
+print(f"Feature dimension: {feature_tokenizer.feature_dim}")  # Should be 896
+```
+
+
+Change 6.2: Update GNN encoder initialization
+Location: Cell 15 or model creation cell
+
+CURRENT:
+```python
+gnn_encoder = ContrastiveGNNEncoder(
+    node_dim=512,
+    hidden_dim=256,
+    output_dim=768,
+    num_layers=2
+)
+```
+
+REPLACE WITH:
+```python
+gnn_encoder = ContrastiveGNNEncoder(
+    node_dim=896,  # NEW: 512 statistical + 384 column name
+    hidden_dim=256,
+    output_dim=768,
+    num_layers=2
+)
+
+print(f"GNN input dimension: {gnn_encoder.GNN.input_dim}")  # Should be 896
+```
+
+
+Change 6.3: Add table name assignment when loading data
+Location: Cell 8 (Data loading)
+
+CURRENT:
+```python
+# Load tables
+tables = []
+for file in os.listdir('hosp/'):
+    if file.endswith('.csv'):
+        df = pd.read_csv(f'hosp/{file}')
+        tables.append(df)
+```
+
+REPLACE WITH:
+```python
+# Load tables and assign names
+tables = []
+for file in sorted(os.listdir('hosp/')):  # Sort for reproducibility
+    if file.endswith('.csv'):
+        df = pd.read_csv(f'hosp/{file}')
+        df.name = file.replace('.csv', '')  # NEW: Assign table name
+        tables.append(df)
+
+print(f"Loaded {len(tables)} tables:")
+for t in tables[:5]:
+    print(f"  - {t.name} ({t.shape[0]} rows, {t.shape[1]} cols)")
+```
+
+
+TESTING PHASE 6:
+---------------
+```python
+# Run in notebook after all changes
+
+# Verify feature dimension
+print(f"Feature tokenizer dimension: {feature_tokenizer.feature_dim}")
+# Expected: 896
+
+# Verify GNN configuration
+print(f"GNN input dimension: {gnn_encoder.GNN.input_dim}")
+# Expected: 896
+
+# Verify table names
+print(f"\nLoaded tables: {[t.name for t in tables[:5]]}")
+# Expected: ['admissions', 'diagnoses_icd', 'labevents', 'patients', 'prescriptions']
+
+# Test full pipeline
+sample_df = tables[0]
+print(f"\nTesting with table: {sample_df.name}")
+
+# Generate questions
+questions = question_gen.generate_questions_for_table(
+    sample_df,
+    rel_gen.compute_labeled_relationships(sample_df, label_gen),
+    num_questions=5
+)
+
+print(f"Generated {len(questions)} questions:")
+for q in questions:
+    print(f"  - {q['question'][:50]}...")
+```
+
+EXPECTED RESULTS:
+----------------
+✅ Feature tokenizer uses 896-d features
+✅ GNN encoder accepts 896-d input
+✅ All tables have assigned names
+✅ Pipeline runs end-to-end without errors
+
+
+================================================================================
+FINAL VALIDATION
+================================================================================
+
+After completing all 6 phases, run this comprehensive test:
+
+```python
+import pandas as pd
+import os
+from contrastive_table2graph import *
+
+# 1. Initialize all components
+data_processor = DataProcessor()
+content_extractor = ColumnContentExtractor()
+feature_tokenizer = LightweightFeatureTokenizer(
+    embedding_strategy='hybrid',
+    include_column_names=True
+)
+rel_gen = RelationshipGenerator()
+label_gen = SemanticLabelGenerator()
+graph_builder = GraphBuilder(
+    content_extractor,
+    feature_tokenizer,
+    rel_gen,
+    label_gen
+)
+question_gen = QuestionGenerator(label_gen)
+
+# 2. Load all 22 MIMIC tables
+tables = []
+for file in sorted(os.listdir('hosp/')):
+    if file.endswith('.csv'):
+        df = pd.read_csv(f'hosp/{file}')
+        df.name = file.replace('.csv', '')
+        tables.append(df)
+
+print(f"✓ Loaded {len(tables)} tables")
+
+# 3. Generate full dataset
+all_questions = question_gen.generate_dataset(
+    tables,
+    rel_gen,
+    num_per_table=20
+)
+
+print(f"✓ Generated {len(all_questions)} questions")
+print(f"  Expected: {len(tables) * 20} (22 tables × 20 questions)")
+
+# 4. Validate question quality
+all_text = ' '.join([q['question'] for q in all_questions])
+common_columns = ['subject_id', 'hadm_id', 'admittime', 'dischtime']
+found_cols = [col for col in common_columns if col in all_text]
+
+print(f"✓ Column names in questions: {len(found_cols)} (expected: 0)")
+
+# 5. Check table distribution
+table_counts = {}
+for q in all_questions:
+    name = q['table_name']
+    table_counts[name] = table_counts.get(name, 0) + 1
+
+print(f"✓ Questions per table: {min(table_counts.values())}-{max(table_counts.values())} (expected: ~20)")
+
+# 6. Test dataset creation
+dataset = TableQuestionDataset(all_questions, data_processor, graph_builder)
+sample = dataset[0]
+
+print(f"✓ Dataset sample keys: {list(sample.keys())}")
+print(f"  Expected: ['graph', 'question', 'label', 'table_name']")
+print(f"✓ Node feature dimension: {sample['graph'].x.shape[1]} (expected: 896)")
+
+# 7. Test DataLoader
+from contrastive_table2graph import collate_fn, create_dataloader
+
+dataloader = create_dataloader(dataset, batch_size=32, shuffle=True)
+batch = next(iter(dataloader))
+
+print(f"✓ Batch keys: {list(batch.keys())}")
+print(f"✓ Batch size: {len(batch['questions'])} (expected: 32)")
+print(f"✓ Batched graph nodes: {batch['graphs'].x.shape}")
+print(f"✓ Question embeddings shape: {batch['question_embeddings'].shape if 'question_embeddings' in batch else 'N/A'}")
+
+print("\n" + "="*80)
+print("ALL PHASES VALIDATED SUCCESSFULLY!")
+print("="*80)
+print("\nReady for training with:")
+print(f"  - {len(tables)} tables")
+print(f"  - {len(all_questions)} training examples")
+print(f"  - 896-d node features (512 stats + 384 column names)")
+print(f"  - Table-level questions (no column names)")
+print(f"  - Pattern-based categorization")
+```
+
+EXPECTED FINAL OUTPUT:
+---------------------
+✓ Loaded 22 tables
+✓ Generated 440 questions
+  Expected: 440 (22 tables × 20 questions)
+✓ Column names in questions: 0 (expected: 0)
+✓ Questions per table: 20-20 (expected: ~20)
+✓ Dataset sample keys: ['graph', 'question', 'label', 'table_name']
+  Expected: ['graph', 'question', 'label', 'table_name']
+✓ Node feature dimension: 896 (expected: 896)
+✓ Batch keys: ['graphs', 'questions', 'labels', 'table_names']
+✓ Batch size: 32 (expected: 32)
+✓ Batched graph nodes: torch.Size([N, 896])
+
+================================================================================
+ALL PHASES VALIDATED SUCCESSFULLY!
+================================================================================
+
+Ready for training with:
+  - 22 tables
+  - 440 training examples
+  - 896-d node features (512 stats + 384 column names)
+  - Table-level questions (no column names)
+  - Pattern-based categorization
+
+
+================================================================================
+SUMMARY OF ALL CHANGES
+================================================================================
+
+Total Lines Modified: ~550
+Total Phases: 7 (0-6)
+
+Phase 0: Node feature enhancement (+90 lines)
+  - Add column name encoder to LightweightFeatureTokenizer
+  - Modify encode_column_content() to concatenate name embeddings
+  - 512-d → 896-d node features
+
+Phase 1: API compatibility (+13 lines)
+  - Add convert_table() alias to GraphBuilder
+
+Phase 2: Table analysis helpers (+227 lines)
+  - Add 6 helper methods for structural pattern detection
+  - Classify tables into pattern categories
+  - Infer semantic domains from column names
+
+Phase 3: Pattern-based templates (+63 lines)
+  - Replace 12 semantic categories with 6 pattern categories
+  - 36 → 72 templates (12 per category)
+  - Remove all column name references
+
+Phase 4: Table-level question generation (+20 lines)
+  - Generate 20 questions per table (not per column pair)
+  - Select templates based on structural patterns
+  - Add domain contextualization
+
+Phase 5: Table name tracking (+7 lines)
+  - Add table_name to dataset output
+  - Enable debugging and evaluation
+
+Phase 6: Notebook updates (+4 lines)
+  - Update initialization parameters
+  - Assign table names when loading
+  - Use 896-d node dimension
+
+Files Modified:
+  - contrastive_table2graph.py (~546 lines)
+  - Contrastive_Table2Graph_Training.ipynb (~4 lines)
+
+Estimated Implementation Time: 3-4 hours
+
+================================================================================
+END OF IMPLEMENTATION PLAN
+================================================================================

@@ -1,0 +1,174 @@
+{
+  "main": {
+    "id": "1c4421ba594690b7",
+    "type": "split",
+    "children": [
+      {
+        "id": "e3b635f7c494995d",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "2e69dd18b80612b1",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "TRAINING_EXPLAINED.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "TRAINING_EXPLAINED"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "bb0aaa7c27cd98f6",
+    "type": "split",
+    "children": [
+      {
+        "id": "c8e908bbc242d67b",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "e62d2568aac8c545",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "eb7a31a08a8c9906",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "ae600dcdccbc1ced",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "3f6b6e7090d06f1e",
+    "type": "split",
+    "children": [
+      {
+        "id": "ae132712579d72e0",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "18b249abe8d3d24e",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "TRAINING_EXPLAINED.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks for TRAINING_EXPLAINED"
+            }
+          },
+          {
+            "id": "6b7c7ac163de434f",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "TRAINING_EXPLAINED.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links from TRAINING_EXPLAINED"
+            }
+          },
+          {
+            "id": "c5854dd93c35bf1a",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "9eaecf5baae4f021",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "TRAINING_EXPLAINED.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline of TRAINING_EXPLAINED"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "2e69dd18b80612b1",
+  "lastOpenFiles": []
+}

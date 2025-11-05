@@ -1,0 +1,755 @@
+================================================================================
+MULTI-RELATIONAL GNN (R-GCN) IMPLEMENTATION PLAN
+================================================================================
+
+Date: 2025-10-27
+Project: struct_gram - Contrastive Table-to-Graph Learning
+Goal: Replace standard GCN with Relational GCN to enable edge-type-specific learning
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+
+CURRENT ARCHITECTURE:
+- GNN: 2-layer TableGCN using standard GCNConv (gcn_conv.py)
+- Edge creation: Binary edges filtered by composite_threshold >= 0.4
+- Edge types: 34 semantic relationship types (PRIMARY_FOREIGN_KEY, TEMPORAL_SEQUENCE, etc.)
+- Problem: All edges treated uniformly - no type-specific message passing
+
+PROPOSED ARCHITECTURE:
+- GNN: 2-layer R-GCN using RGCNConv (PyTorch Geometric)
+- Edge creation: Same filtering, but edges labeled with semantic types
+- Edge types: 34 relation-specific transformations + learnable importance weights
+- Benefit: Model learns which relationship types aid table-question alignment
+
+KEY INSIGHT:
+Current GNN weights ARE learning via backprop through InfoNCE loss, but they
+cannot distinguish between FK edges vs Temporal edges vs Aggregation edges.
+R-GCN adds relation-type-specific transformations, allowing the model to learn:
+"FK edges are important for join questions, Temporal edges for time-series questions"
+
+================================================================================
+BACKGROUND: WHY R-GCN?
+================================================================================
+
+GRADIENT FLOW IN CURRENT ARCHITECTURE:
+InfoNCE Loss
+  ↓
+similarity_matrix (dot product)
+  ↓
+table_embeddings [batch, 768]
+  ↓
+projection_head (256→512→768)
+  ↓
+attention_pool (weighted sum over nodes)
+  ↓
+node_embeddings [num_nodes, 256] ← GNN output
+  ↓
+TableGCN.forward() with 2 GCNConv layers
+  ↓
+GCNConv: h_i^(l+1) = σ(Σ_{j∈N(i)} W^(l) · h_j^(l))
+  ↓
+W^(l) matrices (THESE ARE UPDATED VIA BACKPROP)
+
+CURRENT LIMITATION:
+- Same W^(l) used for ALL edge types
+- FK edge from user_id→order_id uses same transformation as Temporal edge
+- Model cannot learn "emphasize FK edges for join questions"
+
+R-GCN SOLUTION:
+- Different W_r^(l) for each relation type r
+- FK edges: W_FK^(l)
+- Temporal edges: W_TEMPORAL^(l)
+- Model learns relation-specific importance via backprop
+
+================================================================================
+SEMANTIC RELATIONSHIP TYPES (34 TOTAL)
+================================================================================
+
+From SemanticLabelGenerator in contrastive_table2graph.py (lines 533-716):
+
+CATEGORY 1: JOIN RELATIONSHIPS (8 types)
+1. PRIMARY_FOREIGN_KEY
+2. FOREIGN_KEY_CANDIDATE
+3. REVERSE_FOREIGN_KEY
+4. NATURAL_JOIN_CANDIDATE
+5. WEAK_JOIN_CANDIDATE
+6. CROSS_TABLE_REFERENCE
+7. MANY_TO_MANY_REFERENCE
+8. SELF_REFERENTIAL_KEY
+
+CATEGORY 2: AGGREGATION RELATIONSHIPS (7 types)
+9. MEASURE_DIMENSION_STRONG
+10. MEASURE_DIMENSION_WEAK
+11. DIMENSION_HIERARCHY
+12. FACT_DIMENSION
+13. NATURAL_GROUPING
+14. NESTED_AGGREGATION
+15. PIVOT_CANDIDATE
+
+CATEGORY 3: TEMPORAL/ORDERING RELATIONSHIPS (5 types)
+16. TEMPORAL_SEQUENCE_STRONG
+17. TEMPORAL_SEQUENCE_WEAK
+18. TEMPORAL_CORRELATION
+19. SEQUENTIAL_ORDERING
+20. RANKED_RELATIONSHIP
+
+CATEGORY 4: DERIVATION RELATIONSHIPS (6 types)
+21. DERIVED_CALCULATION
+22. FUNCTIONAL_TRANSFORMATION
+23. AGGREGATED_DERIVATION
+24. REDUNDANT_COLUMN
+25. NORMALIZED_VARIANT
+26. SYNONYM_COLUMN
+
+CATEGORY 5: STRUCTURAL RELATIONSHIPS (5 types)
+27. COMPOSITE_KEY_COMPONENT
+28. PARTITION_KEY
+29. INDEX_CANDIDATE
+30. AUDIT_RELATIONSHIP
+31. VERSION_TRACKING
+
+CATEGORY 6: FALLBACK (3 types)
+32. WEAK_CORRELATION
+33. INDEPENDENT_COLUMNS
+34. AMBIGUOUS_RELATIONSHIP
+
+IMPLEMENTATION NOTE:
+We'll create a mapping: semantic_label → relation_id (0-33)
+
+================================================================================
+ARCHITECTURE COMPARISON
+================================================================================
+
+BEFORE (Standard GCN):
+┌─────────────────────────────────────────────────────────────────┐
+│ TableGCN (2 layers)                                             │
+│   Layer 1: GCNConv(512 → 256)  [W^(1): 512×256]                │
+│   Layer 2: GCNConv(256 → 256)  [W^(2): 256×256]                │
+│                                                                 │
+│ Message Passing:                                                │
+│   h_i^(1) = ReLU(Σ_{j∈N(i)} W^(1) · h_j^(0))  ← Same W for all │
+│   h_i^(2) = W^(2) · (Σ_{j∈N(i)} h_j^(1))      ← Same W for all │
+│                                                                 │
+│ Edge Types: IGNORED (all edges treated identically)            │
+└─────────────────────────────────────────────────────────────────┘
+
+AFTER (R-GCN):
+┌─────────────────────────────────────────────────────────────────┐
+│ TableRGCN (2 layers)                                            │
+│   Layer 1: RGCNConv(512 → 256, num_relations=34)               │
+│   Layer 2: RGCNConv(256 → 256, num_relations=34)               │
+│                                                                 │
+│ Message Passing:                                                │
+│   h_i^(1) = ReLU(Σ_r Σ_{j∈N_r(i)} W_r^(1) · h_j^(0))          │
+│            ↑ Sum over relation types                           │
+│   h_i^(2) = Σ_r Σ_{j∈N_r(i)} W_r^(2) · h_j^(1)                │
+│                                                                 │
+│ Edge Types: UTILIZED (34 relation-specific transformations)    │
+│   - W_FK^(l): Learned transformation for FK edges              │
+│   - W_TEMPORAL^(l): Learned transformation for Temporal edges  │
+│   - ... (34 total)                                             │
+│                                                                 │
+│ Regularization: Basis decomposition to reduce parameters       │
+│   W_r = Σ_b a_rb · V_b  (shared basis matrices)               │
+└─────────────────────────────────────────────────────────────────┘
+
+PARAMETER COUNT COMPARISON:
+Standard GCN:
+  Layer 1: 512 × 256 = 131,072 params
+  Layer 2: 256 × 256 = 65,536 params
+  Total: ~196K params
+
+R-GCN (naive):
+  Layer 1: 34 × (512 × 256) = 4,456,448 params
+  Layer 2: 34 × (256 × 256) = 2,228,224 params
+  Total: ~6.7M params (34× increase!)
+
+R-GCN (with basis decomposition, num_bases=30):
+  Layer 1: 30 × (512 × 256) + 34 × 30 = 3,931,200 + 1,020 ≈ 3.93M params
+  Layer 2: 30 × (256 × 256) + 34 × 30 = 1,966,080 + 1,020 ≈ 1.97M params
+  Total: ~5.9M params (30× increase, but more parameter efficient)
+
+MITIGATION:
+- Use num_bases=20-30 (basis decomposition)
+- Share relation embeddings across layers
+- Consider relation-wise dropout
+
+================================================================================
+PHASED IMPLEMENTATION PLAN
+================================================================================
+
+Following your work structure: describe → approve → implement → evaluate
+
+────────────────────────────────────────────────────────────────────────────
+PHASE 1: MODIFY GRAPH CONSTRUCTION TO INCLUDE EDGE TYPES
+────────────────────────────────────────────────────────────────────────────
+
+GOAL: Extend PyGConverter to store edge types (semantic labels) in PyG graphs
+
+CURRENT CODE (contrastive_table2graph.py, lines 828-841):
+```python
+def _create_sparse_edges(self, df, node_mapping):
+    relationships = self.relationship_generator.compute_all_relationship_scores(df)
+    edge_index = []
+    for rel in relationships:
+        if rel.get('composite_score', 0) >= threshold:
+            src_idx = node_mapping[rel['col1']]
+            dst_idx = node_mapping[rel['col2']]
+            edge_index.extend([[src_idx, dst_idx], [dst_idx, src_idx]])
+    return torch.tensor(edge_index).T
+```
+
+PROBLEM:
+- Only returns edge_index [2, num_edges]
+- Semantic labels are computed but discarded
+- No edge_type tensor for R-GCN
+
+NEW CODE STRUCTURE:
+```python
+def _create_sparse_edges_with_types(self, df, node_mapping):
+    """
+    Creates sparse graph with edge types for R-GCN.
+
+    Returns:
+        edge_index: [2, num_edges] - connectivity
+        edge_type: [num_edges] - relation type IDs (0-33)
+    """
+    relationships = self.relationship_generator.compute_labeled_relationships(
+        df, self.semantic_label_generator
+    )
+    edge_index = []
+    edge_type = []
+
+    for rel in relationships:
+        if rel.get('composite_score', 0) >= threshold:
+            src_idx = node_mapping[rel['col1']]
+            dst_idx = node_mapping[rel['col2']]
+
+            # Get semantic label and map to relation ID
+            semantic_label = rel['feature_label']  # e.g., "PRIMARY_FOREIGN_KEY"
+            relation_id = self.label_to_id_map[semantic_label]  # 0-33
+
+            # Undirected edges (both directions same type)
+            edge_index.extend([[src_idx, dst_idx], [dst_idx, src_idx]])
+            edge_type.extend([relation_id, relation_id])
+
+    if not edge_index:
+        return torch.empty((2, 0), dtype=torch.long), torch.empty(0, dtype=torch.long)
+
+    return torch.tensor(edge_index).T, torch.tensor(edge_type, dtype=torch.long)
+```
+
+MODIFICATIONS NEEDED:
+1. Add label_to_id_map to PyGConverter.__init__:
+   ```python
+   self.label_to_id_map = {
+       "PRIMARY_FOREIGN_KEY": 0,
+       "FOREIGN_KEY_CANDIDATE": 1,
+       ...
+       "AMBIGUOUS_RELATIONSHIP": 33
+   }
+   ```
+
+2. Modify _to_pytorch_geometric to include edge_type:
+   ```python
+   def _to_pytorch_geometric(self, node_features, edge_index, edge_type):
+       return Data(x=node_features, edge_index=edge_index, edge_type=edge_type)
+   ```
+
+3. Update convert_table to use new method:
+   ```python
+   def convert_table(self, df):
+       node_features, node_mapping = self._create_embedded_nodes(df)
+       edge_index, edge_type = self._create_sparse_edges_with_types(df, node_mapping)
+       return self._to_pytorch_geometric(node_features, edge_index, edge_type)
+   ```
+
+LOCATION: contrastive_table2graph.py, PyGConverter class (lines 791-855)
+
+DEPENDENCIES:
+- SemanticLabelGenerator must be passed to PyGConverter.__init__
+- RelationshipGenerator.compute_labeled_relationships (already exists, line 261)
+
+────────────────────────────────────────────────────────────────────────────
+PHASE 2: CREATE TableRGCN MODULE
+────────────────────────────────────────────────────────────────────────────
+
+GOAL: Implement R-GCN wrapper similar to TableGCN
+
+NEW FILE: rgcn_conv.py (in same directory as gcn_conv.py)
+
+IMPLEMENTATION:
+```python
+from torch_geometric.nn import RGCNConv
+import torch.nn as nn
+import torch.nn.functional as F
+
+class TableRGCN(nn.Module):
+    """
+    Relational GCN for table graphs with 34 semantic edge types.
+
+    Uses basis decomposition to reduce parameters:
+    - num_relations=34 (semantic relationship types)
+    - num_bases=30 (shared basis matrices for regularization)
+
+    Architecture matches TableGCN but with relation-specific transformations.
+    """
+    def __init__(
+        self,
+        input_dim=512,
+        hidden_dim=256,
+        output_dim=256,
+        num_layers=2,
+        num_relations=34,
+        num_bases=30,
+        dropout=0.1
+    ):
+        super(TableRGCN, self).__init__()
+        self.num_layers = num_layers
+        self.dropout = dropout
+        self.num_relations = num_relations
+
+        self.convs = nn.ModuleList()
+
+        # Layer 1: input_dim → hidden_dim
+        self.convs.append(
+            RGCNConv(
+                input_dim,
+                hidden_dim,
+                num_relations=num_relations,
+                num_bases=num_bases
+            )
+        )
+
+        # Middle layers: hidden_dim → hidden_dim
+        for _ in range(num_layers - 2):
+            self.convs.append(
+                RGCNConv(
+                    hidden_dim,
+                    hidden_dim,
+                    num_relations=num_relations,
+                    num_bases=num_bases
+                )
+            )
+
+        # Final layer: hidden_dim → output_dim
+        self.convs.append(
+            RGCNConv(
+                hidden_dim,
+                output_dim,
+                num_relations=num_relations,
+                num_bases=num_bases
+            )
+        )
+
+    def forward(self, x, edge_index, edge_type, batch=None):
+        """
+        Forward pass with relation-aware message passing.
+
+        Args:
+            x: [num_nodes, input_dim] - node features
+            edge_index: [2, num_edges] - edge connectivity
+            edge_type: [num_edges] - relation type IDs (0-33)
+            batch: [num_nodes] - batch assignment (optional)
+
+        Returns:
+            x: [num_nodes, output_dim] - transformed node embeddings
+        """
+        for i, conv in enumerate(self.convs):
+            # Relation-aware convolution
+            x = conv(x, edge_index, edge_type)
+
+            # Apply activation and dropout (except last layer)
+            if i < self.num_layers - 1:
+                x = F.relu(x)
+                x = F.dropout(x, p=self.dropout, training=self.training)
+
+        return x
+```
+
+KEY DIFFERENCES FROM TableGCN:
+1. Uses RGCNConv instead of GCNConv
+2. Requires edge_type tensor in forward()
+3. Uses basis decomposition (num_bases parameter)
+4. Same interface otherwise (for easy swapping)
+
+DESIGN DECISIONS:
+- num_bases=30: Balances expressiveness vs parameter count
+  - 30 bases < 34 relations → forces shared representations
+  - Regularization effect: prevents overfitting to rare edge types
+- num_relations=34: Fixed (matches semantic label count)
+- Architecture: 2-layer (same as current TableGCN)
+
+────────────────────────────────────────────────────────────────────────────
+PHASE 3: UPDATE ContrastiveGNNEncoder TO USE RGCN
+────────────────────────────────────────────────────────────────────────────
+
+GOAL: Replace TableGCN with TableRGCN in ContrastiveGNNEncoder
+
+CURRENT CODE (contrastive_table2graph.py, lines 913-968):
+```python
+class ContrastiveGNNEncoder(nn.Module):
+    def __init__(self, node_dim=512, hidden_dim=256, output_dim=768, num_layers=2):
+        super().__init__()
+        self.GNN = TableGCN(
+            input_dim=node_dim,
+            hidden_dim=hidden_dim,
+            output_dim=hidden_dim,
+            num_layers=num_layers,
+            dropout=0.1
+        )
+        self.attention_pool = AttentionPooling(hidden_dim)
+        self.projection_head = nn.Sequential(...)
+
+    def forward(self, pyg_data, batch=None):
+        node_embeddings = self.GNN(pyg_data.x, pyg_data.edge_index, batch)
+        ...
+```
+
+NEW CODE:
+```python
+from rgcn_conv import TableRGCN  # Add import at top
+
+class ContrastiveGNNEncoder(nn.Module):
+    def __init__(
+        self,
+        node_dim=512,
+        hidden_dim=256,
+        output_dim=768,
+        num_layers=2,
+        num_relations=34,
+        num_bases=30
+    ):
+        super().__init__()
+
+        # Replace TableGCN with TableRGCN
+        self.GNN = TableRGCN(
+            input_dim=node_dim,
+            hidden_dim=hidden_dim,
+            output_dim=hidden_dim,
+            num_layers=num_layers,
+            num_relations=num_relations,
+            num_bases=num_bases,
+            dropout=0.1
+        )
+
+        self.attention_pool = AttentionPooling(hidden_dim)
+        self.projection_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim*2),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim*2, output_dim)
+        )
+
+    def forward(self, pyg_data, batch=None):
+        """
+        Encode table graph with relation-aware GNN.
+
+        Args:
+            pyg_data: PyG Data object with:
+                - x: [num_nodes, node_dim]
+                - edge_index: [2, num_edges]
+                - edge_type: [num_edges] ← NEW
+            batch: [num_nodes] - batch assignment
+
+        Returns:
+            graph_embedding: [batch_size, output_dim] - L2 normalized
+        """
+        # Relation-aware message passing
+        node_embeddings = self.GNN(
+            pyg_data.x,
+            pyg_data.edge_index,
+            pyg_data.edge_type,  # ← NEW: pass edge types
+            batch
+        )
+
+        # Rest unchanged
+        graph_embedding = self.attention_pool(node_embeddings, batch)
+        projected_embedding = self.projection_head(graph_embedding)
+        projected_embedding = F.normalize(projected_embedding, p=2, dim=-1)
+        return projected_embedding
+```
+
+CHANGES:
+1. Import TableRGCN instead of TableGCN
+2. Add num_relations, num_bases parameters to __init__
+3. Pass edge_type to GNN forward (line 961)
+4. Update docstring
+
+LOCATION: contrastive_table2graph.py, lines 913-968
+
+────────────────────────────────────────────────────────────────────────────
+PHASE 4: UPDATE DATA PIPELINE
+────────────────────────────────────────────────────────────────────────────
+
+GOAL: Ensure PyG graphs include edge_type throughout pipeline
+
+COMPONENTS TO UPDATE:
+
+1. PyGConverter.__init__ (line 791):
+   ```python
+   def __init__(self, content_extractor, feature_tokenizer,
+                relationship_generator, semantic_label_generator, mode='train'):
+       self.semantic_label_generator = semantic_label_generator  # NEW
+       self.label_to_id_map = self._create_label_to_id_map()  # NEW
+       ...
+
+   def _create_label_to_id_map(self):
+       """Create mapping from semantic labels to relation IDs."""
+       labels = [
+           "PRIMARY_FOREIGN_KEY", "FOREIGN_KEY_CANDIDATE", "REVERSE_FOREIGN_KEY",
+           "NATURAL_JOIN_CANDIDATE", "WEAK_JOIN_CANDIDATE", "CROSS_TABLE_REFERENCE",
+           "MANY_TO_MANY_REFERENCE", "SELF_REFERENTIAL_KEY",
+           "MEASURE_DIMENSION_STRONG", "MEASURE_DIMENSION_WEAK", "DIMENSION_HIERARCHY",
+           "FACT_DIMENSION", "NATURAL_GROUPING", "NESTED_AGGREGATION", "PIVOT_CANDIDATE",
+           "TEMPORAL_SEQUENCE_STRONG", "TEMPORAL_SEQUENCE_WEAK", "TEMPORAL_CORRELATION",
+           "SEQUENTIAL_ORDERING", "RANKED_RELATIONSHIP",
+           "DERIVED_CALCULATION", "FUNCTIONAL_TRANSFORMATION", "AGGREGATED_DERIVATION",
+           "REDUNDANT_COLUMN", "NORMALIZED_VARIANT", "SYNONYM_COLUMN",
+           "COMPOSITE_KEY_COMPONENT", "PARTITION_KEY", "INDEX_CANDIDATE",
+           "AUDIT_RELATIONSHIP", "VERSION_TRACKING",
+           "WEAK_CORRELATION", "INDEPENDENT_COLUMNS", "AMBIGUOUS_RELATIONSHIP"
+       ]
+       return {label: i for i, label in enumerate(labels)}
+   ```
+
+2. TableQuestionDataset.__getitem__ (line 1193):
+   - No changes needed (convert_table already returns edge_type)
+
+3. collate_fn (line 1217):
+   - PyG's Batch.from_data_list() automatically handles edge_type
+   - No changes needed
+
+────────────────────────────────────────────────────────────────────────────
+PHASE 5: TESTING AND VALIDATION
+────────────────────────────────────────────────────────────────────────────
+
+GOAL: Verify R-GCN implementation before training
+
+TEST 1: Edge Type Distribution
+```python
+# Check edge type distribution in a sample table
+converter = PyGConverter(...)
+df = pd.read_csv("sample_table.csv")
+pyg_data = converter.convert_table(df)
+
+print(f"Nodes: {pyg_data.x.shape[0]}")
+print(f"Edges: {pyg_data.edge_index.shape[1]}")
+print(f"Edge types: {pyg_data.edge_type.shape[0]}")
+
+# Distribution
+unique, counts = torch.unique(pyg_data.edge_type, return_counts=True)
+for rel_id, count in zip(unique, counts):
+    rel_name = list(label_to_id_map.keys())[rel_id]
+    print(f"  {rel_name}: {count} edges")
+```
+
+Expected output:
+- edge_type.shape[0] == edge_index.shape[1]
+- Most common: PRIMARY_FOREIGN_KEY, MEASURE_DIMENSION_*
+- Rare: AMBIGUOUS_RELATIONSHIP, INDEPENDENT_COLUMNS
+
+TEST 2: Forward Pass Shape Check
+```python
+# Single graph
+batch_size = 1
+graph_encoder = ContrastiveGNNEncoder(num_relations=34, num_bases=30)
+output = graph_encoder(pyg_data)
+assert output.shape == (1, 768), f"Expected (1, 768), got {output.shape}"
+
+# Batched graphs
+from torch_geometric.data import Batch
+batch = Batch.from_data_list([pyg_data, pyg_data, pyg_data])
+output = graph_encoder(batch, batch=batch.batch)
+assert output.shape == (3, 768), f"Expected (3, 768), got {output.shape}"
+```
+
+TEST 3: Gradient Flow Check
+```python
+# Ensure gradients flow to relation-specific parameters
+loss = F.mse_loss(output, torch.randn(3, 768))
+loss.backward()
+
+# Check R-GCN layer gradients
+for name, param in graph_encoder.GNN.named_parameters():
+    if param.grad is not None:
+        print(f"{name}: grad norm = {param.grad.norm().item():.4f}")
+    else:
+        print(f"{name}: NO GRADIENT!")
+```
+
+Expected: All RGCNConv parameters should have gradients
+
+TEST 4: Parameter Count Verification
+```python
+total_params = sum(p.numel() for p in graph_encoder.parameters())
+gnn_params = sum(p.numel() for p in graph_encoder.GNN.parameters())
+
+print(f"Total params: {total_params:,}")
+print(f"GNN params: {gnn_params:,}")
+print(f"Non-GNN params: {total_params - gnn_params:,}")
+```
+
+Expected (with num_bases=30):
+- GNN params: ~5-6M (30× increase from standard GCN)
+- Total params: ~6-7M
+
+================================================================================
+GRADIENT FLOW ANALYSIS: HOW R-GCN LEARNS
+================================================================================
+
+FORWARD PASS:
+Input: Table graph with edge_type tensor
+  ↓
+TableRGCN Layer 1: h^(1) = ReLU(Σ_r Σ_{j∈N_r(i)} W_r^(1) · h_j^(0))
+  ↓
+TableRGCN Layer 2: h^(2) = Σ_r Σ_{j∈N_r(i)} W_r^(2) · h_j^(1)
+  ↓
+AttentionPooling: graph_emb = Σ_i α_i · h_i^(2)
+  ↓
+Projection: projected_emb = MLP(graph_emb)
+  ↓
+L2 Norm: final_emb = projected_emb / ||projected_emb||
+  ↓
+InfoNCE Loss: -log(exp(sim(table, question)) / Σ_j exp(sim(table, question_j)))
+
+BACKWARD PASS:
+∂Loss/∂W_r^(l) = ∂Loss/∂h^(l) · ∂h^(l)/∂W_r^(l)
+
+WHERE:
+∂h_i^(l)/∂W_r^(l) = Σ_{j∈N_r(i)} h_j^(l-1)
+
+INTERPRETATION:
+- If FK edges help alignment → gradients increase W_FK weights
+- If Temporal edges add noise → gradients decrease W_TEMPORAL weights
+- Different questions → different relation types emphasized
+
+EXAMPLE:
+Question: "Which columns have FK? Focus on user_id, order_id"
+- Graph has FK edge: user_id --FK--> order_id
+- Loss encourages: increase similarity between graph_emb and question_emb
+- Gradients flow back: ∂Loss/∂W_FK increases (FK edges become more important)
+- Result: FK edges contribute more to graph embedding
+
+================================================================================
+EXPECTED PERFORMANCE IMPROVEMENTS
+================================================================================
+
+METRICS TO TRACK:
+1. Recall@1 (primary metric)
+2. Recall@5
+3. InfoNCE loss
+4. Training time per epoch
+5. Memory usage
+
+EXPECTED CHANGES:
+1. Performance:
+   - Recall@1: +5-10% improvement (baseline ~0.6 → ~0.65-0.70)
+   - Recall@5: +3-5% improvement
+   - Loss: Lower final loss (better alignment)
+
+2. Interpretability:
+   - Can analyze learned relation weights
+   - Identify which edge types matter for which questions
+
+3. Training dynamics:
+   - Slower convergence initially (more parameters)
+   - Better final performance (more expressive model)
+
+4. Computational cost:
+   - Training time: +50-100% per epoch (more parameters)
+   - Memory: +2-3GB GPU memory (larger model)
+   - Inference: Same speed (forward pass complexity unchanged)
+
+RISK MITIGATION:
+- If training too slow: reduce num_bases from 30 to 20
+- If overfitting: increase dropout from 0.1 to 0.2
+- If memory issues: reduce batch_size from 32 to 16
+
+================================================================================
+IMPLEMENTATION CHECKLIST
+================================================================================
+
+PHASE 1: Graph Construction with Edge Types
+[ ] Modify PyGConverter.__init__ to accept semantic_label_generator
+[ ] Create label_to_id_map (34 semantic labels → 0-33)
+[ ] Implement _create_sparse_edges_with_types()
+[ ] Update _to_pytorch_geometric to include edge_type
+[ ] Update convert_table to use new method
+[ ] Test: Verify edge_type tensor shape matches edge_index
+
+PHASE 2: TableRGCN Module
+[ ] Create rgcn_conv.py file
+[ ] Implement TableRGCN class with RGCNConv layers
+[ ] Set num_relations=34, num_bases=30
+[ ] Match TableGCN interface (input_dim, hidden_dim, output_dim, num_layers)
+[ ] Test: Forward pass with dummy data
+
+PHASE 3: Update ContrastiveGNNEncoder
+[ ] Import TableRGCN
+[ ] Replace TableGCN with TableRGCN in __init__
+[ ] Add num_relations, num_bases parameters
+[ ] Pass edge_type in forward()
+[ ] Test: End-to-end forward pass
+
+PHASE 4: Data Pipeline Updates
+[ ] Update PyGConverter initialization in training script
+[ ] Verify collate_fn handles edge_type (automatic)
+[ ] Test: Batch loading with multiple graphs
+
+PHASE 5: Validation
+[ ] Run all 4 tests (distribution, shape, gradient, params)
+[ ] Verify parameter count (~5-6M for GNN)
+[ ] Check GPU memory usage
+[ ] Profile training speed (single epoch)
+
+================================================================================
+FOLLOW-UP WORK (FUTURE ENHANCEMENTS)
+================================================================================
+
+PRIORITY 1: Relation Weight Analysis
+- After training, extract learned relation weights
+- Visualize which edge types contribute most to alignment
+- Create heatmap: question_type × relation_type → importance
+
+PRIORITY 2: Relation-wise Dropout
+- Add dropout specific to rare relation types
+- Prevents overfitting to uncommon edges
+- Implementation: mask edge_type with probability p_drop
+
+PRIORITY 3: Hierarchical Relation Grouping
+- Group 34 relations into 6 categories (JOIN, AGG, TEMPORAL, etc.)
+- Use 2-level hierarchy: coarse → fine-grained
+- Reduces parameters while maintaining expressiveness
+
+PRIORITY 4: Question-Conditioned Edge Weighting
+- Make relation importance depend on question type
+- Example: "FK question" → upweight FK edges dynamically
+- Requires attention mechanism over edge types
+
+================================================================================
+REFERENCES AND RESOURCES
+================================================================================
+
+PAPERS:
+1. "Modeling Relational Data with Graph Convolutional Networks" (Schlichtkrull et al., 2018)
+   - Original R-GCN paper
+   - Basis decomposition formulation
+
+2. "A Simple Framework for Contrastive Learning of Visual Representations" (Chen et al., 2020)
+   - SimCLR - contrastive learning principles
+   - Temperature scaling and in-batch negatives
+
+PYTORCH GEOMETRIC DOCS:
+- RGCNConv: https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.nn.conv.RGCNConv.html
+- Basis decomposition parameter: num_bases
+- Edge type handling: edge_type tensor
+
+CODE EXAMPLES:
+- PyG R-GCN example: examples/rgcn_link_pred.py
+- Knowledge graph completion with R-GCN
+
+================================================================================
+END OF IMPLEMENTATION PLAN
+================================================================================

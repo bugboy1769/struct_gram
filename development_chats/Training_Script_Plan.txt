@@ -1,0 +1,949 @@
+================================================================================
+TRAINING SCRIPT IMPLEMENTATION PLAN
+================================================================================
+
+Date: 2025-10-27
+Project: struct_gram - Contrastive Table-to-Graph Learning
+Goal: Create end-to-end training pipeline for R-GCN-based contrastive learning
+
+================================================================================
+OVERVIEW
+================================================================================
+
+PURPOSE:
+Create a standalone training script that orchestrates the complete pipeline:
+1. Load and preprocess table data
+2. Generate question-table pairs
+3. Create PyG graphs with edge types
+4. Train ContrastiveGNNEncoder with InfoNCE loss
+5. Evaluate with Recall@K metrics
+6. Save checkpoints and visualize results
+
+TARGET FILE: train_contrastive.py (new file in project root)
+
+DESIGN PRINCIPLES:
+- Modular: Separate data loading, training, and evaluation
+- Configurable: Hyperparameters via argparse or config file
+- Observable: Progress bars, logging, and tensorboard
+- Reproducible: Random seed setting, checkpoint saving
+- Google Colab compatible: No device-specific code, paths relative
+
+================================================================================
+SCRIPT STRUCTURE
+================================================================================
+
+train_contrastive.py
+├── Imports
+├── Configuration (argparse or dict)
+├── Data Loading & Preprocessing
+├── Dataset Generation (Question-Table Pairs)
+├── Model Initialization
+├── Training Loop
+├── Evaluation
+├── Checkpointing & Logging
+└── Main Entry Point
+
+ESTIMATED SIZE: ~350-400 lines
+
+================================================================================
+SECTION 1: IMPORTS AND CONFIGURATION
+================================================================================
+
+IMPORTS:
+```python
+import os
+import argparse
+import random
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+from torch.utils.data import random_split
+from pathlib import Path
+
+# Project imports
+from contrastive_table2graph import (
+    DataProcessor,
+    ColumnContentExtractor,
+    FeatureTokenizer,
+    RelationshipGenerator,
+    SemanticLabelGenerator,
+    PyGConverter,
+    QuestionEncoder,
+    ContrastiveGNNEncoder,
+    InfoNCELoss,
+    QuestionGenerator,
+    TableQuestionDataset,
+    create_dataloader
+)
+from rgcn_conv import TableRGCN  # After Phase 2 implementation
+
+# Optional: For logging and visualization
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD_AVAILABLE = True
+except ImportError:
+    TENSORBOARD_AVAILABLE = False
+    print("Warning: TensorBoard not available. Install with: pip install tensorboard")
+
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    print("Warning: tqdm not available. Install with: pip install tqdm")
+```
+
+CONFIGURATION:
+```python
+class Config:
+    """Training configuration."""
+    # Data paths
+    data_dir = "./data"  # Directory containing CSV files
+    output_dir = "./outputs"  # Save checkpoints and logs here
+
+    # Data generation
+    num_tables = 100  # Number of tables to use (set to None for all)
+    questions_per_table = 20  # Number of questions per table
+
+    # Model architecture
+    node_dim = 512  # Column embedding dimension
+    hidden_dim = 256  # GNN hidden dimension
+    output_dim = 768  # Final embedding dimension (matches question encoder)
+    num_layers = 2  # GNN layers
+    num_relations = 34  # Semantic relationship types
+    num_bases = 30  # Basis decomposition for R-GCN
+
+    # Training hyperparameters
+    batch_size = 32
+    learning_rate = 1e-4
+    weight_decay = 0.01
+    num_epochs = 50
+    temperature = 0.07  # InfoNCE temperature
+
+    # Data split
+    train_split = 0.8  # 80% train, 20% validation
+
+    # Training settings
+    gradient_clip = 1.0  # Max gradient norm
+    print_every = 1  # Print metrics every N epochs
+    save_every = 10  # Save checkpoint every N epochs
+
+    # Reproducibility
+    seed = 42
+
+    # Device (auto-detect)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Logging
+    use_tensorboard = TENSORBOARD_AVAILABLE
+    log_dir = "./runs"
+
+def parse_args():
+    """Parse command-line arguments (optional alternative to Config class)."""
+    parser = argparse.ArgumentParser(description="Train Contrastive Table-Graph Model")
+
+    # Data
+    parser.add_argument("--data_dir", type=str, default="./data")
+    parser.add_argument("--output_dir", type=str, default="./outputs")
+    parser.add_argument("--num_tables", type=int, default=None)
+
+    # Model
+    parser.add_argument("--hidden_dim", type=int, default=256)
+    parser.add_argument("--num_layers", type=int, default=2)
+    parser.add_argument("--num_bases", type=int, default=30)
+
+    # Training
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--seed", type=int, default=42)
+
+    return parser.parse_args()
+```
+
+RECOMMENDATION: Use Config class for simplicity, especially in Colab
+
+================================================================================
+SECTION 2: DATA LOADING AND PREPROCESSING
+================================================================================
+
+GOAL: Load CSV files from data directory, validate, and prepare for processing
+
+```python
+def load_tables_from_directory(data_dir, num_tables=None, file_pattern="*.csv"):
+    """
+    Load table DataFrames from a directory.
+
+    Args:
+        data_dir: Path to directory containing CSV files
+        num_tables: Max number of tables to load (None = all)
+        file_pattern: Glob pattern for files
+
+    Returns:
+        List of (filename, DataFrame) tuples
+    """
+    data_path = Path(data_dir)
+    csv_files = sorted(data_path.glob(file_pattern))
+
+    if num_tables is not None:
+        csv_files = csv_files[:num_tables]
+
+    print(f"Found {len(csv_files)} CSV files in {data_dir}")
+
+    tables = []
+    data_processor = DataProcessor()
+
+    for csv_file in csv_files:
+        try:
+            df = data_processor.load_data(str(csv_file))
+
+            # Basic validation
+            if len(df.columns) < 2:
+                print(f"Skipping {csv_file.name}: < 2 columns")
+                continue
+
+            if len(df) == 0:
+                print(f"Skipping {csv_file.name}: empty table")
+                continue
+
+            tables.append((csv_file.name, df))
+
+        except Exception as e:
+            print(f"Error loading {csv_file.name}: {e}")
+            continue
+
+    print(f"Successfully loaded {len(tables)} tables")
+    return tables
+
+def initialize_pipeline_components():
+    """Initialize all data processing components."""
+    content_extractor = ColumnContentExtractor()
+    feature_tokenizer = FeatureTokenizer()
+    relationship_generator = RelationshipGenerator()
+    semantic_label_generator = SemanticLabelGenerator()
+
+    # PyGConverter with semantic label support for R-GCN
+    pyg_converter = PyGConverter(
+        content_extractor=content_extractor,
+        feature_tokenizer=feature_tokenizer,
+        relationship_generator=relationship_generator,
+        semantic_label_generator=semantic_label_generator,
+        mode='train'
+    )
+
+    return {
+        'content_extractor': content_extractor,
+        'feature_tokenizer': feature_tokenizer,
+        'relationship_generator': relationship_generator,
+        'semantic_label_generator': semantic_label_generator,
+        'pyg_converter': pyg_converter
+    }
+```
+
+================================================================================
+SECTION 3: DATASET GENERATION
+================================================================================
+
+GOAL: Generate question-table pairs and create PyTorch Datasets
+
+```python
+def generate_question_table_pairs(tables, components, config):
+    """
+    Generate question-table pairs for all tables.
+
+    Args:
+        tables: List of (filename, DataFrame) tuples
+        components: Dict of pipeline components
+        config: Config object
+
+    Returns:
+        List of question dicts: [{'table': df, 'question': str, 'label': int}, ...]
+    """
+    print("\n" + "="*70)
+    print("GENERATING QUESTION-TABLE PAIRS")
+    print("="*70)
+
+    question_generator = QuestionGenerator(
+        semantic_label_generator=components['semantic_label_generator']
+    )
+
+    # Extract just DataFrames
+    dfs = [df for _, df in tables]
+
+    # Generate questions
+    all_questions = question_generator.generate_dataset(
+        tables=dfs,
+        relationship_generator=components['relationship_generator'],
+        num_per_table=config.questions_per_table
+    )
+
+    print(f"\nGenerated {len(all_questions)} question-table pairs")
+    print(f"  - All positive pairs (in-batch negatives)")
+    print(f"  - {len(all_questions) / len(dfs):.1f} questions per table (avg)")
+
+    return all_questions
+
+def create_datasets(question_data, components, config):
+    """
+    Create train and validation datasets.
+
+    Args:
+        question_data: List of question dicts
+        components: Dict of pipeline components
+        config: Config object
+
+    Returns:
+        train_dataset, val_dataset
+    """
+    print("\n" + "="*70)
+    print("CREATING TRAIN/VAL DATASETS")
+    print("="*70)
+
+    # Create full dataset
+    full_dataset = TableQuestionDataset(
+        question_data=question_data,
+        data_processor=DataProcessor(),
+        pyg_converter=components['pyg_converter']
+    )
+
+    # Train/val split
+    total_size = len(full_dataset)
+    train_size = int(config.train_split * total_size)
+    val_size = total_size - train_size
+
+    train_dataset, val_dataset = random_split(
+        full_dataset,
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(config.seed)
+    )
+
+    print(f"Dataset sizes:")
+    print(f"  Train: {len(train_dataset)} pairs")
+    print(f"  Val:   {len(val_dataset)} pairs")
+
+    return train_dataset, val_dataset
+
+def create_dataloaders(train_dataset, val_dataset, config):
+    """Create DataLoaders with custom collation."""
+    train_loader = create_dataloader(
+        train_dataset,
+        batch_size=config.batch_size,
+        shuffle=True,
+        num_workers=0  # Set to 0 for Colab compatibility
+    )
+
+    val_loader = create_dataloader(
+        val_dataset,
+        batch_size=config.batch_size,
+        shuffle=False,
+        num_workers=0
+    )
+
+    print(f"\nDataLoaders created:")
+    print(f"  Train batches: {len(train_loader)}")
+    print(f"  Val batches:   {len(val_loader)}")
+
+    return train_loader, val_loader
+```
+
+================================================================================
+SECTION 4: MODEL INITIALIZATION
+================================================================================
+
+GOAL: Initialize models and move to device
+
+```python
+def initialize_models(config):
+    """
+    Initialize question encoder, graph encoder, and loss function.
+
+    Args:
+        config: Config object
+
+    Returns:
+        question_encoder, graph_encoder, loss_fn
+    """
+    print("\n" + "="*70)
+    print("INITIALIZING MODELS")
+    print("="*70)
+
+    # Question encoder (frozen)
+    question_encoder = QuestionEncoder(
+        model_name='all-mpnet-base-v2',
+        freeze=True
+    )
+    print(f"Question Encoder: all-mpnet-base-v2 (frozen)")
+    print(f"  Output dim: {question_encoder.output_dim}")
+
+    # Graph encoder (trainable)
+    graph_encoder = ContrastiveGNNEncoder(
+        node_dim=config.node_dim,
+        hidden_dim=config.hidden_dim,
+        output_dim=config.output_dim,
+        num_layers=config.num_layers,
+        num_relations=config.num_relations,
+        num_bases=config.num_bases
+    )
+
+    # Count parameters
+    total_params = sum(p.numel() for p in graph_encoder.parameters())
+    trainable_params = sum(p.numel() for p in graph_encoder.parameters() if p.requires_grad)
+
+    print(f"\nGraph Encoder: R-GCN with {config.num_layers} layers")
+    print(f"  Node dim: {config.node_dim}")
+    print(f"  Hidden dim: {config.hidden_dim}")
+    print(f"  Output dim: {config.output_dim}")
+    print(f"  Relations: {config.num_relations}")
+    print(f"  Bases: {config.num_bases}")
+    print(f"  Total params: {total_params:,}")
+    print(f"  Trainable params: {trainable_params:,}")
+
+    # Move to device
+    graph_encoder = graph_encoder.to(config.device)
+    question_encoder.encoder = question_encoder.encoder.to(config.device)
+
+    # Loss function
+    loss_fn = InfoNCELoss(temperature=config.temperature)
+
+    print(f"\nInfoNCE Loss: temperature={config.temperature}")
+    print(f"\nDevice: {config.device}")
+
+    return question_encoder, graph_encoder, loss_fn
+
+def initialize_optimizer(graph_encoder, config):
+    """Initialize AdamW optimizer."""
+    optimizer = torch.optim.AdamW(
+        graph_encoder.parameters(),
+        lr=config.learning_rate,
+        weight_decay=config.weight_decay
+    )
+
+    print(f"\nOptimizer: AdamW")
+    print(f"  Learning rate: {config.learning_rate}")
+    print(f"  Weight decay: {config.weight_decay}")
+
+    return optimizer
+```
+
+================================================================================
+SECTION 5: TRAINING LOOP
+================================================================================
+
+GOAL: Main training loop with progress tracking
+
+```python
+def train_epoch(graph_encoder, question_encoder, loss_fn, optimizer,
+                train_loader, config, epoch):
+    """Train for one epoch."""
+    graph_encoder.train()
+    epoch_loss = 0.0
+    num_batches = 0
+
+    # Progress bar
+    if TQDM_AVAILABLE:
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.num_epochs}")
+    else:
+        pbar = train_loader
+
+    for batched_graphs, questions, labels in pbar:
+        # Move to device
+        batched_graphs = batched_graphs.to(config.device)
+
+        # Forward pass
+        graph_embeddings = graph_encoder(
+            batched_graphs,
+            batch=batched_graphs.batch
+        )
+
+        question_embeddings = question_encoder(questions)
+        question_embeddings = question_embeddings.to(config.device)
+
+        # Compute loss
+        loss = loss_fn(graph_embeddings, question_embeddings)
+
+        # Backward pass
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            graph_encoder.parameters(),
+            max_norm=config.gradient_clip
+        )
+        optimizer.step()
+
+        epoch_loss += loss.item()
+        num_batches += 1
+
+        # Update progress bar
+        if TQDM_AVAILABLE:
+            pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+
+    avg_loss = epoch_loss / num_batches if num_batches > 0 else 0.0
+    return avg_loss
+
+@torch.no_grad()
+def validate(graph_encoder, question_encoder, loss_fn, val_loader, config):
+    """Validate on validation set."""
+    graph_encoder.eval()
+    total_loss = 0.0
+    num_batches = 0
+
+    all_graph_embeddings = []
+    all_question_embeddings = []
+
+    for batched_graphs, questions, labels in val_loader:
+        # Move to device
+        batched_graphs = batched_graphs.to(config.device)
+
+        # Forward pass
+        graph_embeddings = graph_encoder(
+            batched_graphs,
+            batch=batched_graphs.batch
+        )
+
+        question_embeddings = question_encoder(questions)
+        question_embeddings = question_embeddings.to(config.device)
+
+        # Compute loss
+        loss = loss_fn(graph_embeddings, question_embeddings)
+        total_loss += loss.item()
+        num_batches += 1
+
+        # Store for recall calculation
+        all_graph_embeddings.append(graph_embeddings)
+        all_question_embeddings.append(question_embeddings)
+
+    avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+
+    # Compute Recall@K
+    graph_embs = torch.cat(all_graph_embeddings, dim=0)
+    question_embs = torch.cat(all_question_embeddings, dim=0)
+
+    recall_1 = compute_recall_at_k(graph_embs, question_embs, k=1)
+    recall_5 = compute_recall_at_k(graph_embs, question_embs, k=5)
+
+    return {
+        'loss': avg_loss,
+        'recall@1': recall_1,
+        'recall@5': recall_5
+    }
+
+def compute_recall_at_k(graph_embeddings, question_embeddings, k=1):
+    """Compute Recall@K for retrieval."""
+    num_questions = question_embeddings.size(0)
+
+    # Similarity matrix
+    similarity = torch.matmul(question_embeddings, graph_embeddings.T)
+
+    # Top-k indices
+    _, top_k_indices = torch.topk(similarity, k=min(k, similarity.size(1)), dim=1)
+
+    # Check if correct graph in top-k
+    correct_indices = torch.arange(num_questions, device=graph_embeddings.device)
+
+    recalls = []
+    for i in range(num_questions):
+        is_in_top_k = correct_indices[i] in top_k_indices[i]
+        recalls.append(is_in_top_k.float().item())
+
+    recall_at_k = sum(recalls) / len(recalls) if recalls else 0.0
+    return recall_at_k
+
+def train(graph_encoder, question_encoder, loss_fn, optimizer,
+          train_loader, val_loader, config, writer=None):
+    """Full training loop."""
+    print("\n" + "="*70)
+    print("STARTING TRAINING")
+    print("="*70)
+
+    best_recall = 0.0
+    train_losses = []
+    val_losses = []
+
+    for epoch in range(config.num_epochs):
+        # Train
+        train_loss = train_epoch(
+            graph_encoder, question_encoder, loss_fn, optimizer,
+            train_loader, config, epoch
+        )
+        train_losses.append(train_loss)
+
+        # Validate
+        val_metrics = validate(
+            graph_encoder, question_encoder, loss_fn, val_loader, config
+        )
+        val_losses.append(val_metrics['loss'])
+
+        # Print metrics
+        if (epoch + 1) % config.print_every == 0:
+            print(f"\nEpoch {epoch+1}/{config.num_epochs}")
+            print(f"  Train Loss: {train_loss:.4f}")
+            print(f"  Val Loss:   {val_metrics['loss']:.4f}")
+            print(f"  Recall@1:   {val_metrics['recall@1']:.3f}")
+            print(f"  Recall@5:   {val_metrics['recall@5']:.3f}")
+
+        # TensorBoard logging
+        if writer is not None:
+            writer.add_scalar('Loss/train', train_loss, epoch)
+            writer.add_scalar('Loss/val', val_metrics['loss'], epoch)
+            writer.add_scalar('Recall/val_recall@1', val_metrics['recall@1'], epoch)
+            writer.add_scalar('Recall/val_recall@5', val_metrics['recall@5'], epoch)
+
+        # Save best model
+        if val_metrics['recall@1'] > best_recall:
+            best_recall = val_metrics['recall@1']
+            save_checkpoint(
+                graph_encoder, optimizer, epoch, val_metrics,
+                config, filename='best_model.pt'
+            )
+
+        # Periodic checkpoint
+        if (epoch + 1) % config.save_every == 0:
+            save_checkpoint(
+                graph_encoder, optimizer, epoch, val_metrics,
+                config, filename=f'checkpoint_epoch_{epoch+1}.pt'
+            )
+
+    print("\n" + "="*70)
+    print("TRAINING COMPLETE")
+    print("="*70)
+    print(f"Best Recall@1: {best_recall:.3f}")
+
+    return {
+        'train_losses': train_losses,
+        'val_losses': val_losses,
+        'best_recall': best_recall
+    }
+```
+
+================================================================================
+SECTION 6: CHECKPOINTING AND LOGGING
+================================================================================
+
+GOAL: Save model checkpoints and create logs
+
+```python
+def save_checkpoint(graph_encoder, optimizer, epoch, metrics, config, filename):
+    """Save model checkpoint."""
+    os.makedirs(config.output_dir, exist_ok=True)
+
+    checkpoint_path = os.path.join(config.output_dir, filename)
+
+    torch.save({
+        'epoch': epoch,
+        'graph_encoder_state': graph_encoder.state_dict(),
+        'optimizer_state': optimizer.state_dict(),
+        'metrics': metrics,
+        'config': vars(config)
+    }, checkpoint_path)
+
+    print(f"  Saved checkpoint: {checkpoint_path}")
+
+def load_checkpoint(checkpoint_path, graph_encoder, optimizer=None):
+    """Load model checkpoint."""
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+
+    graph_encoder.load_state_dict(checkpoint['graph_encoder_state'])
+
+    if optimizer is not None and 'optimizer_state' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer_state'])
+
+    print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
+    print(f"  Metrics: {checkpoint['metrics']}")
+
+    return checkpoint
+
+def setup_logging(config):
+    """Setup TensorBoard logging."""
+    if config.use_tensorboard:
+        os.makedirs(config.log_dir, exist_ok=True)
+        writer = SummaryWriter(log_dir=config.log_dir)
+        print(f"TensorBoard logging enabled: {config.log_dir}")
+        return writer
+    return None
+```
+
+================================================================================
+SECTION 7: MAIN ENTRY POINT
+================================================================================
+
+GOAL: Orchestrate entire pipeline
+
+```python
+def set_seed(seed):
+    """Set random seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+def main():
+    """Main training pipeline."""
+    # Configuration
+    config = Config()
+
+    # Set seed
+    set_seed(config.seed)
+    print(f"Random seed set to {config.seed}")
+
+    # Setup logging
+    writer = setup_logging(config)
+
+    # Load data
+    tables = load_tables_from_directory(
+        config.data_dir,
+        num_tables=config.num_tables
+    )
+
+    # Initialize components
+    components = initialize_pipeline_components()
+
+    # Generate question-table pairs
+    question_data = generate_question_table_pairs(tables, components, config)
+
+    # Create datasets
+    train_dataset, val_dataset = create_datasets(question_data, components, config)
+
+    # Create dataloaders
+    train_loader, val_loader = create_dataloaders(train_dataset, val_dataset, config)
+
+    # Initialize models
+    question_encoder, graph_encoder, loss_fn = initialize_models(config)
+    optimizer = initialize_optimizer(graph_encoder, config)
+
+    # Train
+    results = train(
+        graph_encoder, question_encoder, loss_fn, optimizer,
+        train_loader, val_loader, config, writer
+    )
+
+    # Close logger
+    if writer is not None:
+        writer.close()
+
+    print("\n" + "="*70)
+    print("ALL DONE!")
+    print("="*70)
+
+if __name__ == "__main__":
+    main()
+```
+
+================================================================================
+USAGE INSTRUCTIONS
+================================================================================
+
+GOOGLE COLAB SETUP:
+```python
+# 1. Clone repository
+!git clone https://github.com/yourusername/struct_gram.git
+%cd struct_gram
+
+# 2. Install dependencies
+!pip install torch torchvision torchaudio
+!pip install torch-geometric
+!pip install sentence-transformers
+!pip install pandas numpy scikit-learn tqdm tensorboard
+
+# 3. Upload data to Colab
+from google.colab import files
+uploaded = files.upload()  # Upload CSV files
+
+# Or mount Google Drive
+from google.colab import drive
+drive.mount('/content/drive')
+
+# 4. Run training
+!python train_contrastive.py
+```
+
+LOCAL SETUP:
+```bash
+# 1. Create virtual environment
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+venv\Scripts\activate     # Windows
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Prepare data
+mkdir data
+cp your_tables/*.csv data/
+
+# 4. Run training
+python train_contrastive.py
+```
+
+CUSTOM CONFIGURATION:
+```python
+# Modify Config class in train_contrastive.py
+config.num_epochs = 100
+config.batch_size = 64
+config.learning_rate = 5e-5
+config.num_bases = 20  # Reduce if memory issues
+```
+
+================================================================================
+MONITORING TRAINING
+================================================================================
+
+TENSORBOARD:
+```bash
+# In separate terminal
+tensorboard --logdir=./runs
+
+# Open browser: http://localhost:6006
+```
+
+COLAB TENSORBOARD:
+```python
+%load_ext tensorboard
+%tensorboard --logdir runs
+```
+
+METRICS TO WATCH:
+1. Train Loss: Should decrease steadily
+2. Val Loss: Should decrease, watch for overfitting (gap with train loss)
+3. Recall@1: Main metric - should increase to 0.6-0.7
+4. Recall@5: Should be higher than Recall@1
+
+EXPECTED TRAINING CURVES:
+- Epoch 1-10: Rapid improvement
+- Epoch 10-30: Steady improvement
+- Epoch 30-50: Slow improvement / plateau
+
+RED FLAGS:
+- Train loss decreasing but val loss increasing → Overfitting
+- Both losses not decreasing → Learning rate too high/low
+- Recall@1 stuck at ~0.03 (1/32) → Model not learning, predicting random
+
+================================================================================
+DEBUGGING CHECKLIST
+================================================================================
+
+IF TRAINING CRASHES:
+[ ] Check GPU memory: reduce batch_size or num_bases
+[ ] Check edge_type tensor exists in PyG graphs
+[ ] Verify all components initialized correctly
+[ ] Check data directory has CSV files
+
+IF LOSS IS NaN:
+[ ] Reduce learning rate (1e-4 → 1e-5)
+[ ] Check for empty graphs (tables with no edges)
+[ ] Verify temperature > 0 in InfoNCE
+[ ] Check gradient clipping is enabled
+
+IF RECALL@1 STUCK LOW:
+[ ] Verify question-table pairs are correct (all label=1)
+[ ] Check InfoNCE loss uses diagonal alignment
+[ ] Ensure models are on same device
+[ ] Verify PyG batching creates correct batch tensor
+
+IF TRAINING TOO SLOW:
+[ ] Reduce num_bases from 30 to 20
+[ ] Reduce num_tables to 50-100 for debugging
+[ ] Use smaller batch_size (32 → 16)
+[ ] Disable TensorBoard logging
+
+================================================================================
+EXPECTED OUTPUTS
+================================================================================
+
+DIRECTORY STRUCTURE AFTER TRAINING:
+struct_gram/
+├── data/               # Input CSV files
+├── outputs/            # Model checkpoints
+│   ├── best_model.pt
+│   ├── checkpoint_epoch_10.pt
+│   ├── checkpoint_epoch_20.pt
+│   └── ...
+├── runs/              # TensorBoard logs
+│   └── Dec27_10-30-45_hostname/
+└── train_contrastive.py
+
+CHECKPOINT CONTENTS:
+{
+    'epoch': 49,
+    'graph_encoder_state': OrderedDict(...),  # Model weights
+    'optimizer_state': {...},                  # Optimizer state
+    'metrics': {
+        'loss': 0.234,
+        'recall@1': 0.687,
+        'recall@5': 0.891
+    },
+    'config': {...}  # Training config
+}
+
+CONSOLE OUTPUT:
+```
+Found 100 CSV files in ./data
+Successfully loaded 95 tables
+Generating question-table pairs...
+Generated 1900 question-table pairs
+
+Train: 1520 pairs, Val: 380 pairs
+Train batches: 48, Val batches: 12
+
+Initializing models...
+Graph Encoder: R-GCN with 2 layers
+  Total params: 5,897,344
+  Device: cuda
+
+Starting training...
+
+Epoch 1/50: 100%|████████| 48/48 [00:12<00:00]
+  Train Loss: 4.3241
+  Val Loss:   4.1023
+  Recall@1:   0.034
+  Recall@5:   0.142
+
+Epoch 10/50: 100%|████████| 48/48 [00:11<00:00]
+  Train Loss: 2.1453
+  Val Loss:   2.3012
+  Recall@1:   0.423
+  Recall@5:   0.712
+
+Epoch 50/50: 100%|████████| 48/48 [00:11<00:00]
+  Train Loss: 0.8234
+  Val Loss:   1.2341
+  Recall@1:   0.687
+  Recall@5:   0.891
+
+Training complete!
+Best Recall@1: 0.687
+```
+
+================================================================================
+NEXT STEPS AFTER TRAINING
+================================================================================
+
+1. EVALUATE ON TEST SET:
+   - Create separate test split
+   - Load best_model.pt
+   - Report final Recall@1, Recall@5
+
+2. ANALYZE LEARNED RELATION WEIGHTS:
+   - Extract W_r matrices from R-GCN layers
+   - Compute relation importance scores
+   - Visualize heatmap: question_type × relation_type
+
+3. ERROR ANALYSIS:
+   - Find examples with low similarity (false negatives)
+   - Check edge type distribution for failed cases
+   - Identify which question types perform poorly
+
+4. HYPERPARAMETER TUNING:
+   - Grid search: num_bases ∈ {20, 25, 30, 35}
+   - Grid search: learning_rate ∈ {5e-5, 1e-4, 2e-4}
+   - Grid search: temperature ∈ {0.05, 0.07, 0.10}
+
+5. DEPLOYMENT:
+   - Export to ONNX for production inference
+   - Create FastAPI endpoint for table retrieval
+   - Build demo notebook with example queries
+
+================================================================================
+END OF TRAINING SCRIPT PLAN
+================================================================================
