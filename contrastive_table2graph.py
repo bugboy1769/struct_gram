@@ -1168,6 +1168,774 @@ class QuestionGenerator:
 
 
 # ============================================================================
+# TABLE-SPECIFIC QUESTION GENERATOR (NEW)
+# ============================================================================
+
+class TableSpecificQuestionGenerator:
+    """
+    Generates unique, semantically-rich questions for each table based on:
+    - Column names and types (leverages the 384-d column name embeddings)
+    - Structural patterns (FK relationships, temporal columns, measurements)
+    - Domain-specific terminology
+
+    Each table gets 15-20 UNIQUE questions that describe its specific structure,
+    making it distinguishable from other tables during retrieval.
+
+    Key differences from QuestionGenerator:
+    1. Questions mention specific columns → leverages column name embeddings (384-d)
+    2. Questions describe table structure → aligns with graph topology
+    3. Each table gets unique questions → no ambiguity in supervision
+    """
+
+    def __init__(self):
+        self.question_templates = self._create_templates()
+
+    def _create_templates(self):
+        """
+        Question templates that incorporate column names and structural patterns.
+        Templates are filled dynamically based on each table's characteristics.
+        """
+        return {
+            # Structural pattern templates
+            'column_enumeration': [
+                "Which table has these key columns: {cols}?",
+                "Which table contains columns {cols}?",
+                "Find the table with columns: {cols}",
+                "Which table includes the fields {cols}?",
+            ],
+
+            'fk_pattern': [
+                "Which table uses {fk_col} to link to other entities?",
+                "Which table has {fk_col} as a foreign key reference?",
+                "Which table connects via {fk_col}?",
+                "Find the table that references other tables through {fk_col}",
+            ],
+
+            'temporal_pattern': [
+                "Which table tracks events using {time_cols} timestamps?",
+                "Which table has temporal columns {time_cols}?",
+                "Find the table that records time-ordered data with {time_cols}",
+                "Which table contains time-series data in {time_cols}?",
+            ],
+
+            'measurement_pattern': [
+                "Which table stores measurements in columns like {measure_cols}?",
+                "Which table has numeric fields {measure_cols}?",
+                "Find the table with quantitative data: {measure_cols}",
+                "Which table records values in {measure_cols}?",
+            ],
+
+            'id_pattern': [
+                "Which table uses {id_cols} as identifiers?",
+                "Which table has ID fields {id_cols}?",
+                "Find the table with identifier columns {id_cols}",
+                "Which table tracks entities using {id_cols}?",
+            ],
+
+            'categorical_pattern': [
+                "Which table has categorical fields like {cat_cols}?",
+                "Which table classifies data using {cat_cols}?",
+                "Find the table with category columns {cat_cols}",
+                "Which table groups by {cat_cols}?",
+            ],
+
+            # Hybrid templates (column + structure)
+            'fk_plus_temporal': [
+                "Which table links entities via {fk_col} and tracks time with {time_col}?",
+                "Find the table that combines {fk_col} references with {time_col} timestamps",
+                "Which table has both {fk_col} relationships and {time_col} temporal data?",
+            ],
+
+            'id_plus_measurements': [
+                "Which table tracks {id_col} entities with measurement {measure_col}?",
+                "Find the table that measures {measure_col} for each {id_col}",
+                "Which table stores {measure_col} values per {id_col}?",
+            ],
+
+            # Domain-aware templates
+            'domain_specific': [
+                "Which {domain} table contains {cols}?",
+                "Find the {domain} table with columns {cols}",
+                "Which table stores {domain} data including {cols}?",
+            ],
+
+            # Relationship-aware templates (NEW - leverage GNN message passing)
+            'fk_relationship': [
+                "Which table has foreign key {fk_col} that references {ref_col}?",
+                "Which table uses {fk_col} as a foreign key to link with {ref_col}?",
+                "Find the table where {fk_col} establishes a referential relationship with {ref_col}",
+                "Which table connects {fk_col} to {ref_col} through a foreign key constraint?",
+            ],
+
+            'id_hub_pattern': [
+                "Which table links {id_col} to temporal {time_col} and measurement {measure_col}?",
+                "Which table has {id_col} connected to both {time_col} timestamps and {measure_col} values?",
+                "Find the table where {id_col} branches to {time_col} and {measure_col}",
+                "Which table uses {id_col} as a hub connecting {type1_col} and {type2_col}?",
+            ],
+
+            'measure_dimension_relationship': [
+                "Which table pairs measurement {measure_col} with dimension {dim_col}?",
+                "Which table has a measure-dimension relationship between {measure_col} and {dim_col}?",
+                "Find the table where {measure_col} is grouped by {dim_col}",
+                "Which table links numeric {measure_col} with categorical {dim_col}?",
+            ],
+
+            'temporal_interval': [
+                "Which table tracks time intervals between {start_col} and {end_col}?",
+                "Which table records temporal sequences using {start_col} and {end_col}?",
+                "Find the table that measures durations from {start_col} to {end_col}",
+                "Which table has paired temporal columns {start_col} and {end_col}?",
+            ],
+
+            'functional_dependency': [
+                "Which table has {dependent_col} functionally dependent on {determinant_col}?",
+                "Which table shows that {determinant_col} determines {dependent_col}?",
+                "Find the table where {dependent_col} values are derived from {determinant_col}",
+                "Which table has a functional relationship from {determinant_col} to {dependent_col}?",
+            ],
+
+            'multi_id_hierarchy': [
+                "Which table has interconnected ID columns {id1} and {id2} forming a hierarchy?",
+                "Which table links {id1} to {id2} in a hierarchical foreign key relationship?",
+                "Find the table with nested identifiers {id1} and {id2}",
+                "Which table chains {id1} and {id2} through referential relationships?",
+            ],
+        }
+
+    def generate_questions_for_table(self, df, relationships, num_questions=20):
+        """
+        Generate unique questions for a single table based on its structure.
+
+        Args:
+            df: pandas DataFrame (must have df.name attribute)
+            relationships: list of relationship dicts from RelationshipGenerator
+            num_questions: number of questions to generate (default 20)
+
+        Returns:
+            list of dicts: [{'table': df, 'question': str, 'label': 1, 'table_name': str}, ...]
+        """
+        table_name = df.name if hasattr(df, 'name') else 'unknown'
+
+        # Analyze table structure
+        analysis = self._analyze_table(df, relationships)
+
+        # Generate diverse question types
+        questions = []
+
+        # 1. Column enumeration questions (4 questions)
+        questions.extend(self._generate_column_enumeration_questions(
+            df, analysis, num=4
+        ))
+
+        # 2. Structural pattern questions (5 questions)
+        questions.extend(self._generate_structural_questions(
+            df, analysis, num=5
+        ))
+
+        # 3. Relationship questions (5 questions) - NEW: Leverage GNN message passing
+        questions.extend(self._generate_relationship_questions(
+            df, analysis, relationships, num=5
+        ))
+
+        # 4. Hybrid questions (3 questions)
+        questions.extend(self._generate_hybrid_questions(
+            df, analysis, num=3
+        ))
+
+        # 5. Domain-specific questions (3 questions)
+        questions.extend(self._generate_domain_questions(
+            df, analysis, num=3
+        ))
+
+        # Trim or pad to exact num_questions
+        if len(questions) > num_questions:
+            questions = questions[:num_questions]
+        elif len(questions) < num_questions:
+            # Pad with additional column enumeration questions
+            additional = self._generate_column_enumeration_questions(
+                df, analysis, num=num_questions - len(questions)
+            )
+            questions.extend(additional)
+
+        return questions
+
+    def _analyze_table(self, df, relationships):
+        """
+        Extract structural features from table for question generation.
+
+        Returns:
+            dict with keys:
+                - id_columns: list of ID-like columns
+                - fk_columns: list of foreign key columns
+                - temporal_columns: list of timestamp/date columns
+                - measurement_columns: list of numeric measurement columns
+                - categorical_columns: list of categorical columns
+                - domain: inferred domain (e.g., 'patient', 'lab', 'admission')
+                - primary_columns: most important columns (top 5)
+                - relationship_summary: dict of relationship types
+        """
+        analysis = {
+            'id_columns': [],
+            'fk_columns': [],
+            'temporal_columns': [],
+            'measurement_columns': [],
+            'categorical_columns': [],
+            'domain': 'clinical',
+            'primary_columns': [],
+            'relationship_summary': {}
+        }
+
+        # Detect ID columns
+        for col in df.columns:
+            col_lower = col.lower()
+            if any(pattern in col_lower for pattern in ['_id', 'id', 'key']):
+                analysis['id_columns'].append(col)
+
+        # Detect FK columns from relationships
+        fk_labels = ['PRIMARY_FOREIGN_KEY', 'FOREIGN_KEY_CANDIDATE', 'REVERSE_FOREIGN_KEY']
+        for rel in relationships:
+            label = rel.get('feature_label', '')
+            if any(fk_label in label for fk_label in fk_labels):
+                analysis['fk_columns'].extend([rel['col1'], rel['col2']])
+        analysis['fk_columns'] = list(set(analysis['fk_columns']))
+
+        # Detect temporal columns
+        temporal_keywords = ['time', 'date', 'dob', 'dod', 'year', 'month', 'day', 'timestamp']
+        for col in df.columns:
+            col_lower = col.lower()
+            if any(kw in col_lower for kw in temporal_keywords):
+                analysis['temporal_columns'].append(col)
+            elif pd.api.types.is_datetime64_any_dtype(df[col]):
+                analysis['temporal_columns'].append(col)
+
+        # Detect measurement columns
+        measurement_keywords = ['value', 'num', 'amount', 'count', 'rate', 'score',
+                               'measure', 'result', 'range', 'lower', 'upper']
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        for col in numeric_cols:
+            col_lower = col.lower()
+            if any(kw in col_lower for kw in measurement_keywords):
+                analysis['measurement_columns'].append(col)
+
+        # Detect categorical columns
+        categorical_keywords = ['type', 'category', 'status', 'class', 'group',
+                               'gender', 'race', 'ethnicity', 'code', 'desc']
+        for col in df.columns:
+            col_lower = col.lower()
+            if any(kw in col_lower for kw in categorical_keywords):
+                analysis['categorical_columns'].append(col)
+            elif df[col].dtype == 'object' and df[col].nunique() < 50:
+                analysis['categorical_columns'].append(col)
+
+        # Infer domain
+        analysis['domain'] = self._infer_domain(df)
+
+        # Determine primary columns (most semantically important)
+        analysis['primary_columns'] = self._select_primary_columns(df, analysis)
+
+        # Summarize relationships
+        relationship_types = {}
+        for rel in relationships:
+            label = rel.get('feature_label', 'UNKNOWN')
+            relationship_types[label] = relationship_types.get(label, 0) + 1
+        analysis['relationship_summary'] = relationship_types
+
+        return analysis
+
+    def _infer_domain(self, df):
+        """Infer semantic domain from column names."""
+        col_str = ' '.join(df.columns).lower()
+
+        domain_keywords = {
+            'patient': ['patient', 'subject', 'gender', 'anchor_age', 'dob', 'dod'],
+            'admission': ['admit', 'discharge', 'hadm', 'edregtime', 'edouttime'],
+            'diagnosis': ['diagnosis', 'icd', 'diag', 'icd_code', 'icd_version'],
+            'laboratory': ['lab', 'specimen', 'itemid', 'charttime', 'valuenum', 'valueuom'],
+            'medication': ['drug', 'medication', 'prescription', 'dose', 'pharmacy', 'gsn'],
+            'procedure': ['procedure', 'surgery', 'operation', 'cpt', 'procedureevents'],
+            'transfer': ['transfer', 'ward', 'careunit', 'intime', 'outtime'],
+            'microbiology': ['micro', 'organism', 'antibody', 'culture', 'antibiotic'],
+            'provider': ['provider', 'physician', 'doctor', 'caregiver'],
+        }
+
+        for domain, keywords in domain_keywords.items():
+            if any(kw in col_str for kw in keywords):
+                return domain
+
+        return 'clinical'
+
+    def _select_primary_columns(self, df, analysis):
+        """
+        Select the 4-6 most important columns for this table.
+        Priority: FK columns > ID columns > temporal > measurements > others
+        """
+        primary = []
+
+        # Add FK columns (up to 2)
+        primary.extend(analysis['fk_columns'][:2])
+
+        # Add other ID columns (up to 2)
+        remaining_ids = [c for c in analysis['id_columns'] if c not in primary]
+        primary.extend(remaining_ids[:2])
+
+        # Add temporal columns (up to 2)
+        primary.extend(analysis['temporal_columns'][:2])
+
+        # Add measurement columns (up to 1)
+        primary.extend(analysis['measurement_columns'][:1])
+
+        # Add categorical columns (up to 1)
+        primary.extend(analysis['categorical_columns'][:1])
+
+        # If still < 4, add first few columns
+        if len(primary) < 4:
+            for col in df.columns:
+                if col not in primary:
+                    primary.append(col)
+                if len(primary) >= 6:
+                    break
+
+        return primary[:6]
+
+    def _generate_column_enumeration_questions(self, df, analysis, num=5):
+        """Generate questions listing specific columns."""
+        questions = []
+        table_name = df.name if hasattr(df, 'name') else 'unknown'
+        templates = self.question_templates['column_enumeration']
+
+        # Strategy 1: Use primary columns
+        if len(analysis['primary_columns']) >= 3:
+            for _ in range(min(num, 3)):
+                # Sample 3-5 columns
+                n_cols = np.random.randint(3, min(6, len(analysis['primary_columns']) + 1))
+                sampled_cols = np.random.choice(
+                    analysis['primary_columns'],
+                    size=min(n_cols, len(analysis['primary_columns'])),
+                    replace=False
+                ).tolist()
+
+                col_str = ', '.join(sampled_cols)
+                template = np.random.choice(templates)
+                question = template.format(cols=col_str)
+
+                questions.append({
+                    'table': df,
+                    'question': question,
+                    'label': 1,
+                    'table_name': table_name
+                })
+
+        # Strategy 2: Use different column types
+        remaining = num - len(questions)
+        if remaining > 0 and len(df.columns) >= 3:
+            for _ in range(remaining):
+                sampled_cols = np.random.choice(
+                    df.columns.tolist(),
+                    size=min(4, len(df.columns)),
+                    replace=False
+                ).tolist()
+
+                col_str = ', '.join(sampled_cols)
+                template = np.random.choice(templates)
+                question = template.format(cols=col_str)
+
+                questions.append({
+                    'table': df,
+                    'question': question,
+                    'label': 1,
+                    'table_name': table_name
+                })
+
+        return questions
+
+    def _generate_structural_questions(self, df, analysis, num=7):
+        """Generate questions about structural patterns (FK, temporal, measurements)."""
+        questions = []
+        table_name = df.name if hasattr(df, 'name') else 'unknown'
+
+        # FK questions
+        if analysis['fk_columns'] and len(questions) < num:
+            templates = self.question_templates['fk_pattern']
+            for fk_col in analysis['fk_columns'][:2]:
+                template = np.random.choice(templates)
+                question = template.format(fk_col=fk_col)
+                questions.append({
+                    'table': df,
+                    'question': question,
+                    'label': 1,
+                    'table_name': table_name
+                })
+                if len(questions) >= num:
+                    break
+
+        # Temporal questions
+        if analysis['temporal_columns'] and len(questions) < num:
+            templates = self.question_templates['temporal_pattern']
+            time_cols_str = ', '.join(analysis['temporal_columns'][:3])
+            template = np.random.choice(templates)
+            question = template.format(time_cols=time_cols_str)
+            questions.append({
+                'table': df,
+                'question': question,
+                'label': 1,
+                'table_name': table_name
+            })
+
+        # Measurement questions
+        if analysis['measurement_columns'] and len(questions) < num:
+            templates = self.question_templates['measurement_pattern']
+            measure_cols_str = ', '.join(analysis['measurement_columns'][:3])
+            template = np.random.choice(templates)
+            question = template.format(measure_cols=measure_cols_str)
+            questions.append({
+                'table': df,
+                'question': question,
+                'label': 1,
+                'table_name': table_name
+            })
+
+        # ID questions
+        if analysis['id_columns'] and len(questions) < num:
+            templates = self.question_templates['id_pattern']
+            id_cols_str = ', '.join(analysis['id_columns'][:3])
+            template = np.random.choice(templates)
+            question = template.format(id_cols=id_cols_str)
+            questions.append({
+                'table': df,
+                'question': question,
+                'label': 1,
+                'table_name': table_name
+            })
+
+        # Categorical questions
+        if analysis['categorical_columns'] and len(questions) < num:
+            templates = self.question_templates['categorical_pattern']
+            cat_cols_str = ', '.join(analysis['categorical_columns'][:3])
+            template = np.random.choice(templates)
+            question = template.format(cat_cols=cat_cols_str)
+            questions.append({
+                'table': df,
+                'question': question,
+                'label': 1,
+                'table_name': table_name
+            })
+
+        return questions
+
+    def _generate_hybrid_questions(self, df, analysis, num=4):
+        """Generate questions combining multiple structural patterns."""
+        questions = []
+        table_name = df.name if hasattr(df, 'name') else 'unknown'
+
+        # FK + Temporal
+        if (analysis['fk_columns'] and analysis['temporal_columns']
+            and len(questions) < num):
+            templates = self.question_templates['fk_plus_temporal']
+            fk_col = analysis['fk_columns'][0]
+            time_col = analysis['temporal_columns'][0]
+            template = np.random.choice(templates)
+            question = template.format(fk_col=fk_col, time_col=time_col)
+            questions.append({
+                'table': df,
+                'question': question,
+                'label': 1,
+                'table_name': table_name
+            })
+
+        # ID + Measurements
+        if (analysis['id_columns'] and analysis['measurement_columns']
+            and len(questions) < num):
+            templates = self.question_templates['id_plus_measurements']
+            id_col = analysis['id_columns'][0]
+            measure_col = analysis['measurement_columns'][0]
+            template = np.random.choice(templates)
+            question = template.format(id_col=id_col, measure_col=measure_col)
+            questions.append({
+                'table': df,
+                'question': question,
+                'label': 1,
+                'table_name': table_name
+            })
+
+        # Additional hybrid variations
+        remaining = num - len(questions)
+        if remaining > 0 and len(analysis['primary_columns']) >= 2:
+            for _ in range(remaining):
+                # Pick 2 random primary columns and ask about them together
+                cols = np.random.choice(
+                    analysis['primary_columns'],
+                    size=2,
+                    replace=False
+                ).tolist()
+                question = f"Which table has both {cols[0]} and {cols[1]} columns?"
+                questions.append({
+                    'table': df,
+                    'question': question,
+                    'label': 1,
+                    'table_name': table_name
+                })
+
+        return questions
+
+    def _generate_relationship_questions(self, df, analysis, relationships, num=5):
+        """
+        Generate questions about column relationships (leverages GNN message passing).
+
+        These questions require the GNN to encode relationships between columns,
+        not just column presence. Examples:
+        - FK relationships: "Which table has FK hadm_id that references subject_id?"
+        - Measure-dimension: "Which table pairs measurement valuenum with dimension itemid?"
+        - Temporal intervals: "Which table tracks intervals between admittime and dischtime?"
+
+        Args:
+            df: pandas DataFrame
+            analysis: dict from _analyze_table with column type info
+            relationships: list of relationship dicts with 'feature_label' keys
+            num: number of relationship questions to generate
+
+        Returns:
+            list of question dicts
+        """
+        questions = []
+        table_name = df.name if hasattr(df, 'name') else 'unknown'
+
+        # Group relationships by semantic type
+        fk_relationships = [r for r in relationships
+                           if any(kw in r.get('feature_label', '')
+                                 for kw in ['KEY', 'FOREIGN', 'REFERENCE'])]
+
+        temporal_relationships = [r for r in relationships
+                                 if 'TEMPORAL' in r.get('feature_label', '')]
+
+        measure_dim_relationships = [r for r in relationships
+                                    if 'MEASURE_DIMENSION' in r.get('feature_label', '')]
+
+        functional_dep_relationships = [r for r in relationships
+                                       if 'FUNCTIONAL' in r.get('feature_label', '')]
+
+        # Question Type 1: FK relationship (explicit FK pairs)
+        if fk_relationships and len(questions) < num:
+            rel = fk_relationships[0]
+            col1, col2 = rel['col1'], rel['col2']
+
+            templates = self.question_templates['fk_relationship']
+            template = np.random.choice(templates)
+            question = template.format(fk_col=col1, ref_col=col2)
+
+            questions.append({
+                'table': df,
+                'question': question,
+                'label': 1,
+                'table_name': table_name
+            })
+
+        # Question Type 2: ID hub pattern (ID connected to multiple column types)
+        if (analysis['id_columns'] and len(questions) < num):
+            id_col = analysis['id_columns'][0]
+
+            # Check if ID connects to temporal AND measurement columns
+            if analysis['temporal_columns'] and analysis['measurement_columns']:
+                time_col = analysis['temporal_columns'][0]
+                measure_col = analysis['measurement_columns'][0]
+
+                templates = self.question_templates['id_hub_pattern']
+                template = np.random.choice(templates)
+                question = template.format(
+                    id_col=id_col,
+                    time_col=time_col,
+                    measure_col=measure_col
+                )
+
+                questions.append({
+                    'table': df,
+                    'question': question,
+                    'label': 1,
+                    'table_name': table_name
+                })
+
+            # Alternative: ID connects to two different column types
+            elif len(analysis['primary_columns']) >= 3:
+                # Get columns connected to this ID (via any relationship)
+                connected_cols = []
+                for rel in relationships:
+                    if rel['col1'] == id_col:
+                        connected_cols.append(rel['col2'])
+                    elif rel['col2'] == id_col:
+                        connected_cols.append(rel['col1'])
+
+                if len(connected_cols) >= 2:
+                    type1_col = connected_cols[0]
+                    type2_col = connected_cols[1]
+
+                    templates = self.question_templates['id_hub_pattern']
+                    template = templates[3]  # Use the generic hub template
+                    question = template.format(
+                        id_col=id_col,
+                        type1_col=type1_col,
+                        type2_col=type2_col
+                    )
+
+                    questions.append({
+                        'table': df,
+                        'question': question,
+                        'label': 1,
+                        'table_name': table_name
+                    })
+
+        # Question Type 3: Measure-dimension relationship
+        if measure_dim_relationships and len(questions) < num:
+            rel = measure_dim_relationships[0]
+            # Determine which is measure and which is dimension
+            col1, col2 = rel['col1'], rel['col2']
+
+            # Heuristic: numeric column is measure, other is dimension
+            if col1 in analysis['measurement_columns']:
+                measure_col, dim_col = col1, col2
+            elif col2 in analysis['measurement_columns']:
+                measure_col, dim_col = col2, col1
+            else:
+                measure_col, dim_col = col1, col2  # Fallback
+
+            templates = self.question_templates['measure_dimension_relationship']
+            template = np.random.choice(templates)
+            question = template.format(measure_col=measure_col, dim_col=dim_col)
+
+            questions.append({
+                'table': df,
+                'question': question,
+                'label': 1,
+                'table_name': table_name
+            })
+
+        # Question Type 4: Temporal interval (paired timestamps)
+        if len(analysis['temporal_columns']) >= 2 and len(questions) < num:
+            time1, time2 = analysis['temporal_columns'][:2]
+
+            templates = self.question_templates['temporal_interval']
+            template = np.random.choice(templates)
+            question = template.format(start_col=time1, end_col=time2)
+
+            questions.append({
+                'table': df,
+                'question': question,
+                'label': 1,
+                'table_name': table_name
+            })
+
+        # Question Type 5: Functional dependency
+        if functional_dep_relationships and len(questions) < num:
+            rel = functional_dep_relationships[0]
+            determinant_col = rel['col1']
+            dependent_col = rel['col2']
+
+            templates = self.question_templates['functional_dependency']
+            template = np.random.choice(templates)
+            question = template.format(
+                determinant_col=determinant_col,
+                dependent_col=dependent_col
+            )
+
+            questions.append({
+                'table': df,
+                'question': question,
+                'label': 1,
+                'table_name': table_name
+            })
+
+        # Question Type 6: Multi-ID hierarchy (if multiple FK columns)
+        if len(analysis['fk_columns']) >= 2 and len(questions) < num:
+            id1, id2 = analysis['fk_columns'][:2]
+
+            templates = self.question_templates['multi_id_hierarchy']
+            template = np.random.choice(templates)
+            question = template.format(id1=id1, id2=id2)
+
+            questions.append({
+                'table': df,
+                'question': question,
+                'label': 1,
+                'table_name': table_name
+            })
+
+        return questions
+
+    def _generate_domain_questions(self, df, analysis, num=3):
+        """Generate domain-specific questions."""
+        questions = []
+        table_name = df.name if hasattr(df, 'name') else 'unknown'
+        templates = self.question_templates['domain_specific']
+        domain = analysis['domain']
+
+        for _ in range(num):
+            # Use primary columns
+            n_cols = min(3, len(analysis['primary_columns']))
+            if n_cols > 0:
+                sampled_cols = np.random.choice(
+                    analysis['primary_columns'],
+                    size=n_cols,
+                    replace=False
+                ).tolist()
+
+                cols_str = ', '.join(sampled_cols)
+                template = np.random.choice(templates)
+                question = template.format(domain=domain, cols=cols_str)
+
+                questions.append({
+                    'table': df,
+                    'question': question,
+                    'label': 1,
+                    'table_name': table_name
+                })
+
+        return questions
+
+    def generate_dataset(self, tables, relationship_generator, num_per_table=20):
+        """
+        Generate questions for all tables.
+
+        Args:
+            tables: list of pandas DataFrames (each must have .name attribute)
+            relationship_generator: RelationshipGenerator instance
+            num_per_table: number of questions per table (default 20)
+
+        Returns:
+            list of question dicts
+        """
+        all_questions = []
+
+        for df in tables:
+            try:
+                # Ensure table has name
+                if not hasattr(df, 'name') or df.name is None:
+                    print(f"Warning: Table missing .name attribute, skipping")
+                    continue
+
+                # Generate relationships (needed for structural analysis)
+                relationships = relationship_generator.compute_all_relationship_scores(df)
+
+                # Add semantic labels to relationships for FK detection
+                label_gen = SemanticLabelGenerator()
+                for rel in relationships:
+                    rel['feature_label'] = label_gen.generate_feature_label(
+                        rel['edge_features']
+                    )
+
+                # Generate questions
+                table_questions = self.generate_questions_for_table(
+                    df, relationships, num_questions=num_per_table
+                )
+
+                all_questions.extend(table_questions)
+
+            except Exception as e:
+                print(f"Warning: Failed to generate questions for table {df.name if hasattr(df, 'name') else 'unknown'}: {e}")
+                continue
+
+        return all_questions
+
+
+# ============================================================================
 # PHASE 5: TABLE-QUESTION DATASET
 # ============================================================================
 
@@ -1197,13 +1965,15 @@ class TableQuestionDataset(Dataset):
             dict: {
                 'graph': PyG Data object,
                 'question': str,
-                'label': int (0 or 1)
+                'label': int (0 or 1),
+                'table_name': str
             }
         """
         item = self.question_data[idx]
         df = item['table']
         question = item['question']
         label = item['label']
+        table_name = item.get('table_name', 'unknown')
 
         # Convert table to PyG graph using existing pipeline
         pyg_data = self.pyg_converter.convert_table(df)
@@ -1211,7 +1981,8 @@ class TableQuestionDataset(Dataset):
         return {
             'graph': pyg_data,
             'question': question,
-            'label': label
+            'label': label,
+            'table_name': table_name
         }
 
 
@@ -1223,19 +1994,27 @@ def collate_fn(batch):
         batch: list of dicts from TableQuestionDataset.__getitem__
 
     Returns:
-        batched_graphs: PyG Batch object (batched graphs with global batch index)
-        questions: list of question strings
-        labels: torch.LongTensor of shape [batch_size]
+        dict with keys:
+            'graphs': PyG Batch object (batched graphs with global batch index)
+            'questions': list of question strings
+            'labels': torch.LongTensor of shape [batch_size]
+            'table_names': list of table name strings
     """
     graphs = [item['graph'] for item in batch]
     questions = [item['question'] for item in batch]
     labels = torch.LongTensor([item['label'] for item in batch])
+    table_names = [item['table_name'] for item in batch]
 
     # Batch graphs using PyG's Batch.from_data_list
     # This automatically creates a 'batch' attribute for node-to-graph mapping
     batched_graphs = Batch.from_data_list(graphs)
 
-    return batched_graphs, questions, labels
+    return {
+        'graphs': batched_graphs,
+        'questions': questions,
+        'labels': labels,
+        'table_names': table_names
+    }
 
 
 def create_dataloader(dataset, batch_size=32, shuffle=True, num_workers=0):
