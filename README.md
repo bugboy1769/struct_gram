@@ -1,445 +1,708 @@
-# Table2Graph: Semantic Relationship Detection for Tabular Data
-
-A Graph Neural Network (GNN) framework that converts tabular data into semantic graphs, learning to predict meaningful relationships between table columns. Designed to enhance LLM table reasoning capabilities by providing structured, interpretable column relationships.
+# Contrastive Table-to-Graph Learning Pipeline
 
 ## Overview
 
-Table2Graph addresses a fundamental challenge: how can we help LLMs understand table structure beyond raw data? Traditional approaches either rely on statistical correlations or require external knowledge. This project uses a GNN-based approach to learn semantic relationships directly from table content.
-
-### The Core Idea
-
-1. **Tables as Graphs**: Each column becomes a node, relationships become edges
-2. **Semantic Edge Labels**: 34 distinct relationship types (JOIN patterns, aggregations, temporal sequences, etc.)
-3. **Learning from Content**: Column samples are embedded and fed through a GNN that predicts edge labels
-4. **Classification Task**: The model learns to classify column pairs into semantic categories that matter for SQL generation, data analysis, and table reasoning
-
-### Why This Matters
-
-LLMs struggle with complex table operations because they lack structured understanding of column relationships. Table2Graph provides:
-- **Explainable relationships**: Foreign keys, aggregation pairs, temporal sequences
-- **SQL-aware semantics**: Knows which columns should be JOINed, GROUP BYed, or ORDERed
-- **Analyst intuition**: Captures patterns data scientists use for exploration and feature engineering
-
-## Architecture Evolution
-
-The project evolved from an LLM-based approach to a pure classification system:
-
-**Early Design** (Deprecated):
-- Used HuggingFace transformers for embeddings
-- Required full LLM loaded in memory
-- Computationally expensive, semantically overkill
-
-**Current Design**:
-- Lightweight sentence transformers + TF-IDF + engineered features
-- 90% less memory, 10-50x faster inference
-- GNN learns to predict semantic labels via edge classification
-
-## System Architecture
-
-### High-Level Pipeline
-
-```
-Table Data → Column Sampling → Embedding → Graph Construction → GNN → Edge Predictions
-```
-
-### Core Components
-
-#### 1. Data Processing (`DataProcessor`, `ColumnContentExtractor`)
-
-**Purpose**: Extract representative column samples for embedding
-
-**Key Innovation**: Comprehensive sampling strategy
-- Statistical extremes (min, max, median, quantiles)
-- Most frequent values (30% of samples)
-- Random samples from rare values (50% of samples)
-- Null representations
-
-**Why**: Captures both distribution characteristics and actual content, enabling semantic understanding without seeing entire column.
-
-#### 2. Feature Tokenization (`LightweightFeatureTokenizer`)
-
-**Purpose**: Convert column samples into 512-dimensional embeddings
-
-**Embedding Strategy** (Hybrid):
-- **Semantic encoding** (384 dims): SentenceTransformer `all-MiniLM-L6-v2` for content understanding
-- **Statistical features** (256 dims): TF-IDF on value distributions
-- **Metadata features** (8 dims): Data type, null ratio, cardinality, length statistics
-
-**Design Choice**: No LLM dependency, fast inference, preserves semantic information
-
-#### 3. Relationship Generation (`RelationshipGenerator`)
-
-**Purpose**: Compute features between column pairs to inform edge labels
-
-**Computed Features** (10 total):
-
-**Statistical Features** (5):
-- `name_similarity`: Char-level n-gram similarity between column names
-- `value_similarity`: Cosine similarity of normalized values
-- `jaccard_overlap`: Sampled set overlap of unique values
-- `cardinality_similarity`: Ratio of unique value counts
-- `dtype_similarity`: Type compatibility score
-
-**Semantic Features** (5):
-- `id_reference`: Foreign key detection via containment + cardinality
-- `hierarchical`: Parent-child detection via substring patterns
-- `functional_dependency`: Column A → Column B determinism
-- `measure_dimension`: Numeric-categorical aggregation patterns
-- `temporal_dependency`: Time-based correlation + consistent gaps
-
-**Composite Score**: Weighted sum determines if edge passes threshold (default 0.15)
-
-#### 4. Semantic Label Generation (`SemanticLabelGenerator`)
-
-**Purpose**: Map feature combinations to interpretable relationship types
-
-**The Ontology** (34 relationship categories):
-
-**JOIN Relationships** (8):
-- `PRIMARY_FOREIGN_KEY`: Strong FK pattern for JOINs
-- `FOREIGN_KEY_CANDIDATE`: Likely FK with moderate ID reference
-- `NATURAL_JOIN_CANDIDATE`: High overlap + same dtype
-- `WEAK_JOIN_CANDIDATE`: Some overlap, compatible types
-- `REVERSE_FOREIGN_KEY`: FK but reversed cardinality
-- `CROSS_TABLE_REFERENCE`: Reference across different types
-- `MANY_TO_MANY_REFERENCE`: Low functional dependency + high overlap
-- `SELF_REFERENTIAL_KEY`: Hierarchical self-JOIN pattern
-
-**Aggregation Relationships** (7):
-- `MEASURE_DIMENSION_STRONG`: Primary GROUP BY with aggregation target
-- `MEASURE_DIMENSION_WEAK`: Secondary GROUP BY candidate
-- `DIMENSION_HIERARCHY`: Nested GROUP BY or ROLLUP
-- `FACT_DIMENSION`: Star schema relationship
-- `NATURAL_GROUPING`: Direct GROUP BY pattern
-- `NESTED_AGGREGATION`: Multi-level aggregation
-- `PIVOT_CANDIDATE`: Low-cardinality categorical with numeric
-
-**Ordering Relationships** (5):
-- `TEMPORAL_SEQUENCE_STRONG`: Primary ORDER BY for time-series
-- `TEMPORAL_SEQUENCE_WEAK`: Secondary ORDER BY
-- `TEMPORAL_CORRELATION`: Time-based JOIN or ORDER BY
-- `SEQUENTIAL_ORDERING`: Numeric sequence for ranked queries
-- `RANKED_RELATIONSHIP`: RANK or ROW_NUMBER partitioning
-
-**Derivation Relationships** (6):
-- `DERIVED_CALCULATION`: One column calculated from another
-- `FUNCTIONAL_TRANSFORMATION`: Math/string transformation
-- `AGGREGATED_DERIVATION`: Derived aggregate or summary
-- `REDUNDANT_COLUMN`: Nearly identical, deduplication candidate
-- `NORMALIZED_VARIANT`: Same content, different encoding
-- `SYNONYM_COLUMN`: High name similarity + compatible content
-
-**Structural Relationships** (5):
-- `COMPOSITE_KEY_COMPONENT`: Part of multi-column uniqueness
-- `PARTITION_KEY`: Table partitioning candidate
-- `INDEX_CANDIDATE`: High uniqueness, filtering potential
-- `AUDIT_RELATIONSHIP`: Audit trail or timestamp tracking
-- `VERSION_TRACKING`: Version control or change tracking
-
-**Weak/Unknown** (3):
-- `WEAK_CORRELATION`: Some statistical correlation
-- `INDEPENDENT_COLUMNS`: No clear relationship
-- `AMBIGUOUS_RELATIONSHIP`: Conflicting signals
-
-**Decision Logic**: Rule-based classifier using feature thresholds (see `generate_feature_label()` in `table2graph_sem.py:571-745`)
-
-#### 5. Graph Construction (`GraphBuilder`)
-
-**Purpose**: Convert tables into PyTorch Geometric `Data` objects
-
-**Two Modes**:
-
-**Training Mode**:
-1. Create node features by embedding all columns
-2. Compute relationship features for all column pairs
-3. Generate semantic labels using `SemanticLabelGenerator`
-4. Create edges only for pairs passing composite threshold
-5. Return `Data(x=node_features, edge_index=sparse_edges, edge_attr=label_indices)`
-
-**Test Mode**:
-1. Create node features by embedding all columns
-2. Compute relationship features for candidate pairs
-3. Return `Data(x=node_features, edge_index=candidate_edges)` (no labels)
-4. GNN predicts labels
-
-**Key Design**: Sparse edge creation (threshold filtering) avoids O(n²) complexity
-
-#### 6. GNN Edge Predictor (`GNNEdgePredictor`)
-
-**Purpose**: Learn to predict semantic edge labels from node embeddings
-
-**Architecture**:
-```
-Node Features (512) → TableGCN (3 layers, 256 hidden) → Node Embeddings (256)
-                                                              ↓
-                                      Concat [src_embed | dst_embed] (512)
-                                                              ↓
-                                      Edge Classifier (MLP: 512 → 256 → 128 → 34)
-                                                              ↓
-                                              Class Logits (34 labels)
-```
-
-**GNN Design** (`TableGCN` in [gcn_conv.py](gcn_conv.py)):
-- **1-3 layers** (default: 1): Captures direct + transitive relationships
-- **GCNConv** message passing: Standard graph convolution
-- **ReLU + Dropout**: Prevents overfitting
-
-**Edge Classification**:
-- Concatenate source and destination node embeddings
-- 3-layer MLP with dropout (0.1)
-- CrossEntropyLoss with class weights (handles imbalance)
-
-**Why 1 Layer Works**: Column relationships are often direct; deeper networks capture transitive patterns but risk over-smoothing
-
-#### 7. Training Pipeline (`Table2GraphPipeline`)
-
-**Purpose**: Orchestrate end-to-end training and inference
-
-**Training Flow**:
-```python
-pipeline = Table2GraphPipeline(embedding_strategy='hybrid')
-pipeline.initialize_for_training(node_dim=512, training_tables=[...])
-
-for epoch in range(50):
-    avg_loss, avg_accuracy = pipeline.train_epoch(table_dataframes)
-    # Loss decreases, accuracy increases
-```
-
-**Inference Flow**:
-```python
-pipeline.initialize_for_testing()
-predictions = pipeline.predict_relationships(test_df)
-# Returns: [{'col1': 'user_id', 'col2': 'account_id',
-#            'predicted_label': 'PRIMARY_FOREIGN_KEY',
-#            'confidence': 0.87, 'semantic_meaning': '...'}]
-```
-
-**Key Features**:
-- **Class Weight Balancing**: Computes inverse frequency weights from training data
-- **Multi-Table Training**: Learns generalizable patterns across diverse schemas
-- **Model Checkpointing**: Saves best model based on accuracy
-
-## Training Process
-
-### Dataset: MIMIC-IV Healthcare Data
-
-- **22 CSV tables** (admissions, patients, diagnoses, procedures, etc.)
-- **500 rows per table** (memory-efficient sampling)
-- **Rich relationships**: Foreign keys, temporal sequences, clinical hierarchies
-
-### Configuration
-
-```python
-CONFIG = {
-    'num_epochs': 50,
-    'batch_size': 4,              # 4 tables per batch
-    'early_stopping_patience': 10,
-    'composite_threshold': 0.15,   # Lower = more edges, but noisier
-    'learning_rate': 0.001,
-    'dropout': 0.1
-}
-```
-
-### Training Loop
-
-1. **Shuffle tables** each epoch for diversity
-2. **For each batch**:
-   - Build graph with ground truth labels
-   - Forward pass through GNN
-   - Compute CrossEntropyLoss
-   - Backpropagate and update weights
-3. **Track metrics**: Loss, accuracy, per-epoch timing
-4. **Early stopping**: Stop if no improvement for 10 epochs
-5. **Checkpoint**: Save best model based on accuracy
-
-### Expected Performance
-
-| Metric | Target | Notes |
-|--------|--------|-------|
-| Training Loss | <0.5 | Lower indicates better fit |
-| Training Accuracy | >0.7 | Higher = better label prediction |
-| Time (GPU) | ~1-2 hrs | T4 GPU on Colab |
-| Time (CPU) | ~4-8 hrs | Slower but works |
-
-### Class Imbalance Handling
-
-The 34 labels are highly imbalanced (e.g., `INDEPENDENT_COLUMNS` is common, `SELF_REFERENTIAL_KEY` is rare). The pipeline addresses this via:
-
-1. **Inverse Frequency Weights**: Computed from training data
-2. **Weighted CrossEntropyLoss**: Rare classes get higher loss penalties
-3. **Composite Threshold**: Filters weak edges, reducing `INDEPENDENT_COLUMNS` dominance
-
-## Code Structure
-
-```
-struct_gram/
-├── table2graph_sem.py          # Main pipeline (1265 lines)
-│   ├── DataProcessor           # File loading, validation
-│   ├── ColumnStatsExtractor    # Statistical features
-│   ├── ColumnContentExtractor  # Comprehensive sampling
-│   ├── RelationshipGenerator   # 10 relationship features
-│   ├── SemanticLabelGenerator  # 34-label ontology
-│   ├── LightweightFeatureTokenizer  # Embedding (hybrid)
-│   ├── GraphBuilder            # PyG Data construction
-│   ├── GNNEdgePredictor        # 3-layer GNN + classifier
-│   └── Table2GraphPipeline     # Training/inference orchestration
-│
-├── gcn_conv.py                 # TableGCN implementation
-│   └── TableGCN                # GCNConv layers with dropout
-│
-├── MIMIC_Training_Colab.ipynb  # Training notebook
-├── COLAB_TRAINING_README.md    # Training guide
-└── development_chats/          # Design discussions
-    ├── architecture_evolution.txt
-    └── Claude-Graph neural network for table reasoning.txt
-```
-
-## Usage
-
-### Training on Custom Data
-
-```python
-from table2graph_sem import Table2GraphPipeline
-import pandas as pd
-
-# Load your tables
-tables = [pd.read_csv(f) for f in ['table1.csv', 'table2.csv', ...]]
-
-# Initialize pipeline
-pipeline = Table2GraphPipeline(embedding_strategy='hybrid')
-pipeline.initialize_for_training(node_dim=512, training_tables=tables)
-
-# Train
-for epoch in range(50):
-    avg_loss, avg_accuracy = pipeline.train_epoch(tables)
-    print(f"Epoch {epoch}: Loss={avg_loss:.4f}, Acc={avg_accuracy:.3f}")
-
-# Save model
-pipeline.save_model('trained_model.pt')
-```
-
-### Inference on New Tables
-
-```python
-# Load trained model
-pipeline = Table2GraphPipeline(embedding_strategy='hybrid')
-pipeline.load_model('trained_model.pt')
-pipeline.initialize_for_testing()
-
-# Predict relationships
-df = pd.read_csv('new_table.csv')
-predictions = pipeline.predict_relationships(df)
-
-# View results
-for pred in predictions:
-    print(f"{pred['col1']} ↔ {pred['col2']}")
-    print(f"  Label: {pred['predicted_label']}")
-    print(f"  Confidence: {pred['confidence']:.3f}")
-    print(f"  Meaning: {pred['semantic_meaning']}\n")
-```
-
-## Training on Google Colab
-
-See [COLAB_TRAINING_README.md](COLAB_TRAINING_README.md) for step-by-step guide.
-
-**Quick Start**:
-1. Upload `table2graph_sem.py`, `gcn_conv.py`, and `hosp/` folder to Colab
-2. Open `MIMIC_Training_Colab.ipynb`
-3. Run all cells
-4. Monitor training progress and view predictions
-
-## Design Decisions & Tradeoffs
-
-### Why Classification Over Regression?
-
-**Considered**: Predicting continuous relationship scores
-**Chosen**: Discrete semantic labels
-
-**Rationale**:
-- Interpretability: "PRIMARY_FOREIGN_KEY" is actionable, 0.73 is not
-- Compatibility: LLMs consume categorical relationships better
-- Training stability: Classification converges faster than regression
-
-### Why Lightweight Embeddings?
-
-**Considered**: Full transformer embeddings (GPT-2, LLaMA)
-**Chosen**: Sentence transformers + TF-IDF
-
-**Rationale**:
-- 10-50x faster inference
-- 90% less memory
-- No LLM dependency
-- Sufficient for column content understanding
-
-### Why 1 GNN Layer?
-
-**Considered**: 3-5 layers for deeper transitive reasoning
-**Chosen**: 1 layer (default), tunable up to 3
-
-**Rationale**:
-- Column relationships are often direct
-- Deeper networks risk over-smoothing
-- Faster training, less overfitting
-- 1 layer achieves >70% accuracy on MIMIC-IV
-
-### Why 34 Labels?
-
-**Considered**: Fewer labels (simpler), more labels (finer-grained)
-**Chosen**: 34 labels across 6 categories
-
-**Rationale**:
-- Covers major SQL operations (JOIN, GROUP BY, ORDER BY)
-- Captures data analysis patterns (segmentation, outlier detection)
-- Balances granularity with trainability
-- Expandable ontology for future tasks
-
-## Key Insights
-
-### What Works
-
-1. **Hybrid embeddings** balance speed and semantics
-2. **Sparse graph construction** (threshold filtering) avoids quadratic blowup
-3. **Class weighting** handles severe label imbalance
-4. **Semantic features** (functional dependency, ID patterns) outperform pure statistics
-5. **Multi-table training** generalizes across schemas
-
-### Current Limitations
-
-1. **Circular supervision**: Training labels derived from engineered features, limiting novel pattern discovery
-2. **Threshold sensitivity**: Composite threshold (0.15) requires tuning per dataset
-3. **No cross-table reasoning**: Each table processed independently
-4. **Sampling bias**: 500 rows may miss rare relationships
-5. **Ontology brittleness**: 34 labels may not cover all domain-specific patterns
-
-### Future Directions
-
-1. **Attention mechanisms**: Learn which features matter for each relationship type
-2. **Contrastive learning**: Use positive/negative column pairs without explicit labels
-3. **LLM-augmented labels**: Use LLM to generate semantic interpretations for ambiguous cases
-4. **Cross-table graphs**: Model entire database schemas as single graph
-5. **Dynamic ontology**: Learn relationship embeddings instead of fixed categories
-
-## References
-
-- **MIMIC-IV**: Johnson et al. (2023). PhysioNet. https://doi.org/10.13026/6mm1-ek67
-- **Sentence Transformers**: Reimers & Gurevych (2019). "Sentence-BERT"
-- **PyTorch Geometric**: Fey & Lenssen (2019). "Fast Graph Representation Learning"
-
-## Citation
-
-```bibtex
-@software{table2graph2025,
-  title={Table2Graph: Semantic Relationship Detection for Tabular Data},
-  author={Singh, Shwetabh},
-  year={2025},
-  url={https://github.com/shwetabh-singh/struct_gram}
-}
-```
-
-## License
-
-MIT License - See LICENSE file for details
+`contrastive_table2graph.py` implements a **contrastive learning framework** for semantic table retrieval. The system learns to match natural language questions with relevant database tables by:
+
+1. Converting tables into **graph representations** (columns = nodes, relationships = edges)
+2. Encoding graphs using **Graph Neural Networks (GNNs)**
+3. Aligning table embeddings with question embeddings via **InfoNCE loss**
+4. Enabling **semantic table retrieval** through learned similarity
 
 ---
 
-**Status**: Active development | **Last Updated**: October 2025 | **Maintainer**: Shwetabh Singh
+## Architecture Diagram
+
+```
+┌─────────────────┐
+│  Database Table │
+│  (DataFrame)    │
+└────────┬────────┘
+         │
+         ├──────────────────────────────────────┐
+         │                                      │
+         ▼                                      ▼
+┌────────────────────┐              ┌──────────────────────┐
+│ Column Features    │              │ Relationship         │
+│ • 512-d stats      │              │ Detection            │
+│ • 384-d col names  │              │ • 10 edge features   │
+│ = 896-d per node   │              │ • Semantic labels    │
+└────────┬───────────┘              └──────────┬───────────┘
+         │                                      │
+         └──────────────┬───────────────────────┘
+                        ▼
+              ┌──────────────────┐
+              │ Graph (PyG Data) │
+              │ • Nodes: 896-d   │
+              │ • Edges: sparse  │
+              └────────┬─────────┘
+                       │
+                       ▼
+         ┌─────────────────────────┐
+         │ TableGCN (2 layers)     │
+         │ 896-d → 768-d → 768-d   │
+         └─────────────┬───────────┘
+                       │
+                       ▼
+         ┌─────────────────────────┐
+         │ Attention Pooling       │
+         │ Graph-level embedding   │
+         └─────────────┬───────────┘
+                       │
+                       ▼
+         ┌─────────────────────────┐
+         │ Projection Head         │
+         │ 768-d → 1536-d → 768-d  │
+         └─────────────┬───────────┘
+                       │
+                       ▼
+              ┌────────────────┐
+              │ Table Embedding│──────┐
+              │ (768-d, L2-norm)│      │
+              └────────────────┘      │
+                                      │ Cosine
+┌──────────────────────┐              │ Similarity
+│ Natural Language     │              │
+│ Question             │              │
+└──────────┬───────────┘              │
+           │                          │
+           ▼                          │
+┌──────────────────────┐              │
+│ SentenceTransformer  │              │
+│ (frozen, mpnet)      │              │
+└──────────┬───────────┘              │
+           │                          │
+           ▼                          │
+  ┌────────────────┐                  │
+  │Question Embed  │──────────────────┘
+  │(768-d, L2-norm)│
+  └────────────────┘
+           │
+           ▼
+    ┌──────────────┐
+    │ InfoNCE Loss │
+    │ (contrastive)│
+    └──────────────┘
+```
+
+---
+
+## Components
+
+### 1. Data Processing
+
+#### `DataProcessor`
+Handles file loading and basic data validation.
+
+```python
+processor = DataProcessor()
+df = processor.load_data('table.csv')
+report = processor.validate_data(df)
+```
+
+**Features:**
+- Supports CSV, Excel, JSON, Parquet
+- Data validation and memory checks
+- Column preprocessing
+
+---
+
+#### `ColumnContentExtractor`
+Samples column values for statistical analysis.
+
+```python
+extractor = ColumnContentExtractor(sample_size=50)
+col_stats = extractor.get_col_stats(df, 'column_name')
+# Returns: {'column_content': str, 'data_type': str, ...}
+```
+
+**Sampling strategy:**
+- Null representations (10%)
+- Statistical extremes (min, max, median, quartiles)
+- Most frequent values (30%)
+- Random samples (50%)
+- Padding with mode
+
+---
+
+### 2. Relationship Detection
+
+#### `RelationshipGenerator`
+Computes 10 edge features between all column pairs.
+
+```python
+rel_gen = RelationshipGenerator(threshold_config={
+    'composite_threshold': 0.4,
+    'weights': {...}
+})
+relationships = rel_gen.compute_all_relationship_scores(df)
+```
+
+**Edge Features (10-dimensional):**
+
+| Feature | Description | Weight |
+|---------|-------------|--------|
+| `name_similarity` | Character n-gram similarity (TF-IDF) | 0.10 |
+| `value_similarity` | Cosine similarity of value distributions | 0.15 |
+| `jaccard_overlap` | Set intersection over union | 0.10 |
+| `cardinality_similarity` | min(card1, card2) / max(card1, card2) | 0.05 |
+| `dtype_similarity` | Data type compatibility | 0.05 |
+| **`id_reference`** | FK pattern detection (containment + cardinality) | **0.15** |
+| **`hierarchical`** | Parent-child substring patterns | **0.10** |
+| **`functional_dependency`** | s1 → s2 determinism | **0.10** |
+| **`measure_dimension`** | Numeric-categorical pairing | **0.10** |
+| **`temporal_dependency`** | Datetime correlation | **0.10** |
+
+**Composite Score:**
+```python
+composite_score = Σ (feature_i × weight_i)
+# Edge created if: composite_score ≥ 0.4
+```
+
+---
+
+#### `SemanticLabelGenerator`
+Classifies relationships into 34 semantic types using decision tree logic.
+
+```python
+label_gen = SemanticLabelGenerator()
+label = label_gen.generate_feature_label(edge_features)
+# Returns: 'PRIMARY_FOREIGN_KEY', 'TEMPORAL_SEQUENCE_STRONG', etc.
+```
+
+**Label Categories (34 types):**
+1. **Join Relationships (8):** PRIMARY_FOREIGN_KEY, FOREIGN_KEY_CANDIDATE, NATURAL_JOIN_CANDIDATE...
+2. **Aggregation Relationships (7):** MEASURE_DIMENSION_STRONG, DIMENSION_HIERARCHY...
+3. **Ordering Relationships (5):** TEMPORAL_SEQUENCE_STRONG, TEMPORAL_CORRELATION...
+4. **Derivation Relationships (6):** DERIVED_CALCULATION, FUNCTIONAL_TRANSFORMATION...
+5. **Structural Relationships (5):** COMPOSITE_KEY_COMPONENT, PARTITION_KEY...
+6. **Weak/Unknown (3):** WEAK_CORRELATION, INDEPENDENT_COLUMNS...
+
+---
+
+### 3. Node Feature Extraction
+
+#### `LightweightFeatureTokenizer`
+Encodes column content into 512-dimensional vectors.
+
+```python
+tokenizer = LightweightFeatureTokenizer(
+    embedding_strategy='hybrid'  # Uses both semantic + statistical
+)
+embedding = tokenizer.encode_column_content(col_stats)
+# Returns: 512-d numpy array
+```
+
+**Feature Components:**
+- **Semantic embeddings** (384-d): SentenceTransformer on column values
+- **Statistical embeddings** (256-d): TF-IDF on value strings
+- **Metadata features** (8-d): dtype indicators, null%, length, etc.
+- Total: 384 + 256 + 8 → padded/truncated to **512-d**
+
+**Note:** The current implementation uses 512-d, but can be extended to 896-d (512 stats + 384 column names) for better alignment with questions.
+
+---
+
+### 4. Graph Construction
+
+#### `GraphBuilder`
+Converts DataFrames into PyTorch Geometric graphs.
+
+```python
+graph_builder = GraphBuilder(
+    content_extractor=extractor,
+    feature_tokenizer=tokenizer,
+    relationship_generator=rel_gen,
+    semantic_label_generator=label_gen,
+    mode='train'
+)
+
+pyg_data = graph_builder.build_graph(df)
+# Or: pyg_data = graph_builder.convert_table(df)  # Alias
+```
+
+**Graph Structure:**
+- **Nodes:** One per column (512-d or 896-d features)
+- **Edges:** Undirected, created if composite_score ≥ 0.4
+- **Sparsity:** Typically 20-50 edges for 10-15 column tables
+
+---
+
+### 5. Neural Network Components
+
+#### `QuestionEncoder`
+Encodes questions using frozen SentenceTransformer.
+
+```python
+question_encoder = QuestionEncoder(
+    model_name='all-mpnet-base-v2',
+    freeze=True  # Frozen during training
+)
+embeddings = question_encoder(["Which table has patient data?"])
+# Returns: [batch_size, 768]
+```
+
+---
+
+#### `ContrastiveGNNEncoder`
+Encodes table graphs into 768-d embeddings.
+
+```python
+graph_encoder = ContrastiveGNNEncoder(
+    node_dim=896,      # Input node feature dimension
+    hidden_dim=768,    # GNN hidden dimension (CRITICAL: keep ≥ 768)
+    output_dim=768,    # Match question space
+    num_layers=2       # 2-layer GNN
+)
+table_embedding = graph_encoder(pyg_data, batch=None)
+# Returns: [1, 768] L2-normalized
+```
+
+**Architecture:**
+1. **TableGCN** (2 layers): Message passing to enrich node features
+2. **AttentionPooling**: Weighted aggregation to graph-level embedding
+3. **Projection Head**: 768-d → 1536-d → 768-d with ReLU + Dropout
+4. **L2 Normalization**: Enables cosine similarity
+
+---
+
+#### `InfoNCELoss`
+Contrastive loss with in-batch negatives.
+
+```python
+loss_fn = InfoNCELoss(temperature=0.07)
+loss = loss_fn(table_embeddings, question_embeddings)
+```
+
+**Loss Formula:**
+```
+For each table_i:
+loss_i = -log( exp(sim(table_i, question_i) / τ)
+              / Σ_j exp(sim(table_i, question_j) / τ) )
+
+where:
+  sim(a, b) = cosine_similarity(a, b) = a·b (for L2-normalized vectors)
+  τ = temperature (default: 0.07)
+  j ∈ [1, batch_size] (in-batch negatives)
+```
+
+**In-Batch Negatives:**
+- Batch size 32 → 1 positive + 31 negatives per sample
+- Total: 32 positives + 992 negatives per batch
+
+---
+
+### 6. Question Generation
+
+#### `QuestionGenerator` (OLD - Column-Pair Questions)
+Generates questions about column relationships.
+
+```python
+# Legacy generator - generates column-pair questions
+question_gen = QuestionGenerator(semantic_label_generator)
+questions = question_gen.generate_dataset(tables, rel_gen, num_per_table=20)
+```
+
+**Problems:**
+- Asks about column pairs, not tables
+- Generic templates don't leverage column names
+- **Not recommended for use**
+
+---
+
+#### `TableSpecificQuestionGenerator` (NEW - ✅ Recommended)
+Generates unique questions per table mentioning specific columns.
+
+```python
+question_gen = TableSpecificQuestionGenerator()
+questions = question_gen.generate_dataset(
+    tables,
+    rel_gen,
+    num_per_table=20
+)
+```
+
+**Question Distribution (20 per table):**
+1. **Column enumeration** (4): "Which table has columns A, B, C?"
+2. **Structural patterns** (5): "Which table uses X as FK?" / "Which table has temporal Y?"
+3. **Relationship questions** (5): "Which table has FK X that references Y?"
+4. **Hybrid questions** (3): "Which table links X and tracks time with Y?"
+5. **Domain-specific** (3): "Which laboratory table contains X, Y, Z?"
+
+**Key Advantages:**
+- ✅ Each table gets unique questions
+- ✅ Questions mention specific column names
+- ✅ Leverages column name embeddings (384-d)
+- ✅ 5/20 questions leverage GNN message passing
+- ✅ No ambiguity in supervision
+
+---
+
+### 7. Dataset & DataLoader
+
+#### `TableQuestionDataset`
+PyTorch Dataset for table-question pairs.
+
+```python
+dataset = TableQuestionDataset(
+    question_data=questions,
+    data_processor=processor,
+    pyg_converter=graph_builder
+)
+
+sample = dataset[0]
+# Returns: {
+#     'graph': PyG Data,
+#     'question': str,
+#     'label': int,
+#     'table_name': str
+# }
+```
+
+---
+
+#### `collate_fn` & `create_dataloader`
+Batches graphs and questions.
+
+```python
+dataloader = create_dataloader(
+    dataset,
+    batch_size=32,
+    shuffle=True
+)
+
+for batch in dataloader:
+    graphs = batch['graphs']        # PyG Batch object
+    questions = batch['questions']  # List of strings
+    labels = batch['labels']        # Tensor [32]
+    table_names = batch['table_names']  # List of strings
+```
+
+---
+
+## Training Pipeline
+
+### Basic Training Loop
+
+```python
+import torch
+from contrastive_table2graph import *
+
+# 1. Initialize components
+processor = DataProcessor()
+extractor = ColumnContentExtractor()
+tokenizer = LightweightFeatureTokenizer(embedding_strategy='hybrid')
+rel_gen = RelationshipGenerator()
+graph_builder = GraphBuilder(extractor, tokenizer, rel_gen, mode='train')
+
+# 2. Load tables
+tables = []
+for csv_file in Path('data/').glob('*.csv'):
+    df = pd.read_csv(csv_file, nrows=500)
+    df.name = csv_file.stem  # Important: assign table name
+    tables.append(df)
+
+# 3. Generate questions
+question_gen = TableSpecificQuestionGenerator()
+question_data = question_gen.generate_dataset(tables, rel_gen, num_per_table=20)
+
+# 4. Create dataset
+dataset = TableQuestionDataset(question_data, processor, graph_builder)
+train_loader = create_dataloader(dataset, batch_size=32, shuffle=True)
+
+# 5. Initialize models
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+question_encoder = QuestionEncoder('all-mpnet-base-v2', freeze=True).to(device)
+graph_encoder = ContrastiveGNNEncoder(
+    node_dim=512,      # Or 896 if using column names
+    hidden_dim=768,    # Keep ≥ 768 to avoid bottleneck
+    output_dim=768,
+    num_layers=2
+).to(device)
+
+loss_fn = InfoNCELoss(temperature=0.07)
+optimizer = torch.optim.AdamW(graph_encoder.parameters(), lr=5e-4)
+
+# 6. Training loop
+for epoch in range(50):
+    graph_encoder.train()
+
+    for batch in train_loader:
+        graphs = batch['graphs'].to(device)
+        questions = batch['questions']
+
+        # Forward pass
+        table_embs = graph_encoder(graphs, batch=graphs.batch)
+        question_embs = question_encoder(questions).to(device)
+
+        # Loss
+        loss = loss_fn(table_embs, question_embs)
+
+        # Backward
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(graph_encoder.parameters(), 1.0)
+        optimizer.step()
+```
+
+---
+
+## Key Design Decisions
+
+### 1. Why Contrastive Learning?
+**Alternative approaches:**
+- Classification: `P(table | question)` requires fixed table set
+- Supervised pairs: Expensive manual annotation
+
+**Contrastive advantages:**
+- Learns general similarity function
+- Scales to new tables without retraining
+- Self-supervised via structural questions
+
+---
+
+### 2. Why Freeze Question Encoder?
+**Rationale:**
+- SentenceTransformer already trained on 1B+ sentences
+- Training graph encoder is easier than joint training
+- Prevents catastrophic forgetting of language understanding
+
+**Trade-off:**
+- Graph encoder must adapt to frozen question space
+- Can't fine-tune question encoder for domain jargon
+
+---
+
+### 3. Why Sparse Graphs?
+**Threshold-based edge creation** (composite_score ≥ 0.4):
+- **Dense graphs:** All-to-all connections → GNN over-smoothing -> Essentially an MLP
+- **Sparse graphs:** Only meaningful relationships → Better signal
+
+**Typical sparsity:** 20-50 edges for 10-15 columns (~20-30% density)
+
+---
+
+### 4. Why 2-Layer GNN?
+**Layer depth analysis:**
+- **1 layer:** Only aggregates immediate neighbors
+- **2 layers:** Captures 2-hop relationships (ID → FK → Timestamp)
+- **3+ layers:** Over-smoothing, all nodes become similar
+
+**Best practice:** 2 layers for tables with 10-20 columns
+
+---
+
+## Performance Expectations
+
+### With Old `QuestionGenerator` (Generic Questions)
+```
+Epoch 10: Recall@1 = 0.05 (worse than random 4.5%)
+Epoch 20: Recall@1 = 0.07
+Epoch 50: Recall@1 = 0.09 (never converges)
+```
+**Problem:** Ambiguous supervision (multiple tables match same questions)
+
+---
+
+### With New `TableSpecificQuestionGenerator`
+```
+Epoch 5:  Recall@1 = 0.35
+Epoch 10: Recall@1 = 0.62
+Epoch 20: Recall@1 = 0.75
+Epoch 50: Recall@1 = 0.80-0.85
+```
+**Improvement:** Clear supervision (unique questions per table)
+
+---
+
+## Common Issues & Solutions
+
+### Issue 1: Low Recall (<10%)
+**Symptoms:** Model doesn't learn, loss plateaus
+
+**Causes:**
+1. Using old `QuestionGenerator` (generic questions)
+2. `hidden_dim=256` (information bottleneck)
+3. Learning rate too low
+4. Tables missing `.name` attribute
+
+**Solutions:**
+```python
+# ✅ Use new question generator
+question_gen = TableSpecificQuestionGenerator()
+
+# ✅ Use hidden_dim=768
+graph_encoder = ContrastiveGNNEncoder(node_dim=512, hidden_dim=768, ...)
+
+# ✅ Increase learning rate
+optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4)
+
+# ✅ Assign table names
+for df in tables:
+    df.name = 'table_name'
+```
+
+---
+
+### Issue 2: Sparse Graphs (Too Few Edges)
+**Symptoms:** Many tables have <5 edges
+
+**Cause:** Threshold 0.4 too high for your data
+
+**Solution:**
+```python
+rel_gen = RelationshipGenerator(threshold_config={
+    'composite_threshold': 0.3,  # Lower from 0.4 to 0.3
+    'weights': {...}
+})
+```
+
+---
+
+### Issue 3: Out of Memory
+**Symptoms:** CUDA OOM during training
+
+**Solutions:**
+```python
+# Reduce batch size
+dataloader = create_dataloader(dataset, batch_size=16)  # Was 32
+
+# Reduce table size
+df = pd.read_csv('table.csv', nrows=300)  # Was 500
+
+# Use gradient accumulation
+for i, batch in enumerate(dataloader):
+    loss = loss / accumulation_steps
+    loss.backward()
+    if (i + 1) % accumulation_steps == 0:
+        optimizer.step()
+        optimizer.zero_grad()
+```
+
+---
+
+### Issue 4: Model Doesn't Generalize to New Domain
+**Symptoms:** Good recall on healthcare data, poor on construction data
+
+**Cause:** Domain-specific column names (e.g., `hadm_id` vs `project_id`)
+
+**Solutions:**
+```python
+# Option 1: Few-shot fine-tuning (100 examples, 5 epochs)
+construction_questions = question_gen.generate_dataset(
+    construction_tables[:3], rel_gen, num_per_table=20
+)
+# Fine-tune with lr=1e-5
+
+# Option 2: Add column name embeddings (384-d)
+# Helps with semantic transfer: 'admittime' ≈ 'start_date'
+tokenizer = LightweightFeatureTokenizer(
+    embedding_strategy='hybrid',
+    include_column_names=True  # 512→896-d nodes
+)
+```
+
+---
+
+## File Structure
+
+```
+contrastive_table2graph.py (2000+ lines)
+├── Data Processing (Lines 30-123)
+│   ├── DataProcessor
+│   └── ColumnContentExtractor
+├── Relationship Detection (Lines 215-528)
+│   ├── RelationshipGenerator (10 edge features)
+│   └── SemanticLabelGenerator (34 semantic labels)
+├── Feature Extraction (Lines 724-773)
+│   └── LightweightFeatureTokenizer (512-d node features)
+├── Graph Construction (Lines 782-856)
+│   └── GraphBuilder (DataFrame → PyG Data)
+├── Neural Networks (Lines 858-1008)
+│   ├── QuestionEncoder (frozen SentenceTransformer)
+│   ├── ContrastiveGNNEncoder (2-layer GNN + projection)
+│   ├── AttentionPooling
+│   └── InfoNCELoss
+├── Question Generation (Lines 1014-1935)
+│   ├── QuestionGenerator (OLD - not recommended)
+│   └── TableSpecificQuestionGenerator (NEW - ✅ use this)
+└── Dataset (Lines 1942-2000+)
+    ├── TableQuestionDataset
+    ├── collate_fn
+    └── create_dataloader
+```
+
+---
+
+## Quick Start Example
+
+```python
+# Minimal working example
+import pandas as pd
+from pathlib import Path
+from contrastive_table2graph import *
+
+# Load data
+df = pd.read_csv('data/patients.csv', nrows=500)
+df.name = 'patients'
+
+# Initialize pipeline
+extractor = ColumnContentExtractor()
+tokenizer = LightweightFeatureTokenizer(embedding_strategy='hybrid')
+rel_gen = RelationshipGenerator()
+graph_builder = GraphBuilder(extractor, tokenizer, rel_gen)
+
+# Generate graph
+pyg_data = graph_builder.build_graph(df)
+print(f"Nodes: {pyg_data.x.shape}")  # [num_columns, 512]
+print(f"Edges: {pyg_data.edge_index.shape}")  # [2, num_edges]
+
+# Generate questions
+question_gen = TableSpecificQuestionGenerator()
+questions = question_gen.generate_questions_for_table(
+    df,
+    rel_gen.compute_all_relationship_scores(df),
+    num_questions=20
+)
+
+for i, q in enumerate(questions[:3], 1):
+    print(f"{i}. {q['question']}")
+```
+
+---
+
+## References & Related Work
+
+**Contrastive Learning:**
+- CLIP (Radford et al., 2021): Image-text alignment
+- DPR (Karpukhin et al., 2020): Dense passage retrieval
+- SimCLR (Chen et al., 2020): Self-supervised contrastive learning
+
+**Table Understanding:**
+- TaBERT (Yin et al., 2020): Table pretraining
+- TURL (Deng et al., 2020): Table-entity retrieval
+- RelBench (Fey et al., 2024): Relational deep learning benchmark
+
+**Graph Neural Networks:**
+- GCN (Kipf & Welling, 2017): Graph convolutional networks
+- GAT (Veličković et al., 2018): Graph attention networks
+
+---
+
+## License & Citation
+
+If you use this code, please cite:
+
+```bibtex
+@software{struct_gram_2024,
+  title={Contrastive Table-to-Graph Learning for Semantic Retrieval},
+  author={Shwetabh Singh},
+  year={2024},
+  url={https://github.com/bugboy1769/struct_gram}
+}
+```
+
+---
+
+

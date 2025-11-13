@@ -8,7 +8,7 @@ from llm_serving.llm_call import generate_batch_without_decode
 import matplotlib.pyplot as plt
 from torch_geometric.data import Data
 from gcn_conv import TableGCN
-from projection_layer import LLMProjector
+from legacyd2fg.projection_layer import LLMProjector
 import time
 from langchain_ollama import OllamaLLM
 from vllm import LLM, SamplingParams
@@ -486,22 +486,6 @@ class GraphBuilder:
 
 
 # Upcoming Classes: Graph Builder, Graph Converter, GCNProcessor, Table2GraphPipeline
-
-
-
-    
-
-def generate_vllm(prompt):
-    return llm.generate(prompt, vllm_llm.sampling_params)
-
-
-def table_to_nx_graph(df):
-    G=nx.Graph()
-    node_features=[]
-    max_len=0
-    for col in df.columns:
-        col_stats=get_col_stats(df, col)
-        G.add_node(f"col_{col}", node_type="column", col_stats)
 
 
 

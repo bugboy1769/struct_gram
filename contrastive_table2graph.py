@@ -1,4 +1,3 @@
-@ -1,1496 +0,0 @@
 """
 Contrastive Learning Pipeline for Table-to-Graph Semantic Analysis
 ====================================================================
@@ -20,6 +19,13 @@ from torch.utils.data import Dataset, DataLoader
 from gcn_conv import TableGCN
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
+import warnings
+
+# Suppress NumPy correlation warnings for constant columns (zero variance)
+# These occur when computing correlations on columns with no variance (all same values)
+# The code handles these cases with try-except blocks, so warnings are not actionable
+warnings.filterwarnings('ignore', message='invalid value encountered in divide')
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='numpy')
 
 PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
 
@@ -498,8 +504,22 @@ class RelationshipGenerator:
             df_temp=pd.DataFrame({'dt1':dt1, 'dt2':dt2}).dropna()
             if len(df_temp)<5:
                 return 0.0
+
+            # Convert to int64 for correlation computation
+            dt1_int = df_temp['dt1'].astype('int64')
+            dt2_int = df_temp['dt2'].astype('int64')
+
+            # Check for zero variance (constant timestamps) - correlation is undefined
+            if dt1_int.std() == 0 or dt2_int.std() == 0:
+                return 0.0
+
             #Check for temporal corr
-            correlation=df_temp['dt1'].astype('int64').corr(df_temp['dt2'].astype('int64'))
+            correlation = dt1_int.corr(dt2_int)
+
+            # Handle NaN correlation
+            if pd.isna(correlation):
+                return 0.0
+
             #Check for consistent time gaps
             time_diffs=(df_temp['dt2']-df_temp['dt1']).dt.total_seconds()
             consistent_gap=time_diffs.std()/(time_diffs.mean() + 1e-10) if len(time_diffs)>1 else 1
@@ -513,12 +533,23 @@ class RelationshipGenerator:
             df_temp=pd.DataFrame({'s1':series1, 's2':series2}).dropna()
             if len(df_temp)<5:
                 return 0.0
+
+            # Check for zero variance (constant columns) - correlation is undefined
+            if df_temp['s1'].std() == 0 or df_temp['s2'].std() == 0:
+                return 0.0
+
             correlation=df_temp['s1'].corr(df_temp['s2'])
+
+            # Handle NaN correlation (shouldn't happen with variance check, but be safe)
+            if pd.isna(correlation):
+                return 0.0
+
             s1_diffs=df_temp['s1'].diff().dropna()
             s2_diffs=df_temp['s2'].diff().dropna()
-            if len(s1_diffs)>0 and len(s2_diffs)>0:
+            if len(s1_diffs)>0 and len(s2_diffs)>0 and s1_diffs.std() > 0 and s2_diffs.std() > 0:
                 diff_correlation=s1_diffs.corr(s2_diffs)
-                return abs(correlation)*0.6 + abs(diff_correlation)*0.4
+                if not pd.isna(diff_correlation):
+                    return abs(correlation)*0.6 + abs(diff_correlation)*0.4
             return abs(correlation)*0.8
         except Exception:
             return 0.0
@@ -789,12 +820,25 @@ class GraphBuilder:
     Question for user: Should I modify _create_supervised_edges now to return
     edge_features instead of edge_labels, or keep it as-is for now?
     """
-    def __init__(self, content_extractor, feature_tokenizer, relationship_generator, semantic_label_generator=None, mode='train'):
+    def __init__(self, content_extractor, feature_tokenizer, relationship_generator, semantic_label_generator=None, mode='train', use_column_names=False, question_encoder=None):
         self.content_extractor=content_extractor
         self.feature_tokenizer=feature_tokenizer
         self.relationship_generator=relationship_generator
         self.semantic_label_generator=semantic_label_generator
         self.mode=mode
+        self.use_column_names=use_column_names
+        self.question_encoder=question_encoder
+
+        # Use question encoder for column names if provided (recommended for semantic alignment)
+        # This ensures column names and questions live in the SAME embedding space
+        if self.use_column_names and self.question_encoder is None:
+            # Fallback: create separate encoder (not recommended)
+            from sentence_transformers import SentenceTransformer
+            self.column_name_encoder = SentenceTransformer('all-mpnet-base-v2')
+            print("[WARNING] Using separate encoder for column names. Consider passing question_encoder for better alignment.")
+        elif self.use_column_names:
+            self.column_name_encoder = self.question_encoder
+            print("[INFO] Using shared question encoder for column names - perfect semantic alignment!")
 
     def build_graph(self, df):
         """Main orchestration method - returns torch_geometric Data object"""
@@ -807,7 +851,16 @@ class GraphBuilder:
         return self._to_pytorch_geometric(node_features, edge_index)
 
     def _create_embedded_nodes(self, df):
-        """Creates 512-d node embeddings for each column"""
+        """
+        Creates node embeddings for each column.
+
+        Returns:
+            - 512-d if use_column_names=False (statistical features only)
+            - 1280-d if use_column_names=True (512-d stats + 768-d column names from all-mpnet-base-v2)
+
+        Note: When question_encoder is shared, column names are embedded in the SAME space as questions,
+              enabling perfect semantic alignment (e.g., "hadm_id" in column name ≈ "hadm_id" in question).
+        """
         node_features=[]
         node_mapping={}
         # Fit TF-IDF vectorizer if needed
@@ -818,10 +871,36 @@ class GraphBuilder:
                 inner_content=list(content_dict.values())[0]
                 all_content.append(inner_content['column_content'])
             self.feature_tokenizer.vectorizer.fit(all_content)
+
+        # Encode column names if needed
+        if self.use_column_names:
+            # Use the encoder's encode method (works for both QuestionEncoder and SentenceTransformer)
+            if hasattr(self.column_name_encoder, 'encoder'):
+                # It's a QuestionEncoder wrapper - use its encode method
+                column_name_embeddings = self.column_name_encoder.encode(df.columns.tolist())
+            else:
+                # It's a raw SentenceTransformer
+                column_name_embeddings = self.column_name_encoder.encode(
+                    df.columns.tolist(),
+                    convert_to_tensor=True,
+                    show_progress_bar=False
+                )
+
         # Encode each column
         for idx, col in enumerate(df.columns):
             content_dict=self.content_extractor.get_col_stats(df, col)
-            embedding=self.feature_tokenizer.encode_column_content(content_dict)
+            stat_embedding=self.feature_tokenizer.encode_column_content(content_dict)
+
+            if self.use_column_names:
+                # Concatenate: 512-d stats + 768-d column name (all-mpnet-base-v2) = 1280-d
+                if torch.is_tensor(column_name_embeddings):
+                    name_embedding = column_name_embeddings[idx].cpu().numpy()
+                else:
+                    name_embedding = column_name_embeddings[idx]
+                embedding = np.concatenate([stat_embedding, name_embedding])
+            else:
+                embedding = stat_embedding
+
             node_features.append(embedding)
             node_mapping[col]=idx
         return torch.stack([torch.tensor(f, dtype=torch.float32) for f in node_features]), node_mapping
@@ -1000,6 +1079,12 @@ class InfoNCELoss(nn.Module):
         #Default: diagonal matching
         if labels is None:
             labels=torch.arange(batch_size, device=table_embeddings.device)
+
+        # Clone question_embeddings to avoid inference tensor error
+        # Frozen encoder creates inference tensors that can't be saved for backward
+        # Cloning creates a normal tensor that participates in autograd
+        question_embeddings = question_embeddings.clone().detach().requires_grad_(False)
+
         #Compute similarity matrix
         similarity_matrix=torch.matmul(table_embeddings,question_embeddings.T)/self.temperature
         #Apply Cross Entropy
@@ -1976,7 +2061,7 @@ class TableQuestionDataset(Dataset):
         table_name = item.get('table_name', 'unknown')
 
         # Convert table to PyG graph using existing pipeline
-        pyg_data = self.pyg_converter.convert_table(df)
+        pyg_data = self.pyg_converter.build_graph(df)
 
         return {
             'graph': pyg_data,

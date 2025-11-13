@@ -25,7 +25,7 @@ print("=" * 60)
 
 # Install dependencies
 print("\n[1/6] Installing dependencies...")
-!pip install -q sentence-transformers torch-geometric scikit-learn
+#!pip install -q sentence-transformers torch-geometric scikit-learn
 
 # Mount Google Drive (optional - for saving checkpoints)
 print("\n[2/6] Mounting Google Drive...")

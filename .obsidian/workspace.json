@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "TRAINING_EXPLAINED.md",
+                "file": "README.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "TRAINING_EXPLAINED"
+              "title": "README"
             }
           }
         ]
@@ -170,5 +170,23 @@
     }
   },
   "active": "2e69dd18b80612b1",
-  "lastOpenFiles": []
+  "lastOpenFiles": [
+    "legacyd2fg/t5_enc_dec.py",
+    "legacyd2fg/Project.csv",
+    "legacyd2fg/customer.csv",
+    "legacyd2fg/Start research - Start research.csv",
+    "legacyd2fg/train_mimic_colab.py",
+    "old_architectures/table2graph.py",
+    "old_architectures/table2graph_sem.py",
+    "old_architectures/table2graph_rewrite.py",
+    "old_architectures/table2graph_amb.py",
+    "old_architectures/tab2graph_cuda.py",
+    "old_architectures",
+    "CONTRASTIVE_TABLE2GRAPH_README.md",
+    "README.md",
+    "legacyd2fg/readme2.md",
+    "legacyd2fg/README.md",
+    "COLAB_TRAINING_README.md",
+    "TRAINING_EXPLAINED.md"
+  ]
 }
