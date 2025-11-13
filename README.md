@@ -698,7 +698,7 @@ If you use this code, please cite:
 @software{struct_gram_2024,
   title={Contrastive Table-to-Graph Learning for Semantic Retrieval},
   author={Shwetabh Singh},
-  year={2024},
+  year={2025},
   url={https://github.com/bugboy1769/struct_gram}
 }
 ```
