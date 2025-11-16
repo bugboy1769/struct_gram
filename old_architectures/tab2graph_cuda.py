@@ -8,7 +8,7 @@ from llm_serving.llm_call import generate_batch_without_decode
 import matplotlib.pyplot as plt
 from torch_geometric.data import Data
 from gcn_conv import TableGCN
-from projection_layer import LLMProjector
+from legacyd2fg.projection_layer import LLMProjector
 import time
 from vllm import LLM, SamplingParams
 
